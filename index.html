@@ -698,7 +698,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '22';
+const APP_VERSION = '23';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -2269,13 +2269,28 @@ class App {
     // so storageKey and id are made unique in one place and the duplicate check
     // sees only the records that came before it. Job Applyr 1's folder names
     // repeat, so they are not unique enough to trust. See D-12 and D-13.
+    //
+    // ORDER IS THE ANSWER HERE, so it is fixed before anything is created.
+    // buildDuplicateCheck() marks a record when it has already seen a matching
+    // one, so the D lands on whichever of a pair is created second — and
+    // dir.values() makes no promise about order. On the first real run it
+    // handed back the newer record of every pair first, which put all three
+    // marks on the OLDER row, the opposite of D-14's rule. Sorting by the
+    // evaluated date is the same thing recomputeDuplicateChecks() does when it
+    // sorts by storageKey; the folder name breaks a same-day tie so two
+    // postings from one company on one day are still deterministic. See D-24.
+    const ordered = found
+      .map(rec => ({ folder: rec.folder, raw: importRecordToRaw(rec.files) }))
+      .sort((a, b) => String(a.raw.addedDate || '').localeCompare(String(b.raw.addedDate || ''))
+                      || String(a.folder).localeCompare(String(b.folder)));
+
     const jobs = this.state.jobs.slice();
     const added = [];
     const saveFailures = [];
-    for (let i = 0; i < found.length; i++) {
-      const job = normalizeJob(importRecordToRaw(found[i].files), jobs);
+    for (let i = 0; i < ordered.length; i++) {
+      const job = normalizeJob(ordered[i].raw, jobs);
       if (await store.saveJob(job)) { jobs.push(job); added.push(job); }
-      else saveFailures.push(found[i].folder);
+      else saveFailures.push(ordered[i].folder);
       this.setState({ importProgress: i + 1 });
     }
 
