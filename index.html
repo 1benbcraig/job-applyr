@@ -698,7 +698,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '19';
+const APP_VERSION = '20';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -2137,7 +2137,7 @@ class App {
             <h2 style="margin:0 0 var(--space-1)">${titleLink(job.title, job.sourceUrl, 20)}</h2>
             <p class="text-muted" style="margin:0">${escapeHtml(job.company)} · ${escapeHtml(job.location)} · ${escapeHtml(job.salary)}</p>
             ${(job.duplicateCheck && job.duplicateCheck.isReapply) ? `
-              <p style="margin:var(--space-2) 0 0;font-size:14px;color:var(--color-flagged-700)">↻ You applied to this company and title before${job.duplicateCheck.priorAppliedDates.length ? ' on ' + job.duplicateCheck.priorAppliedDates.map(d => formatDate(d)).join(', ') : ''}.</p>
+              <p style="display:inline-block;margin:var(--space-2) 0 0;font-size:14px;font-weight:600;color:${DUPE_MARK};background:${DUPE_HIGHLIGHT};padding:6px 10px">↻ ${job.duplicateCheck.priorAppliedDates.length ? 'You applied to this company and title before on ' + job.duplicateCheck.priorAppliedDates.map(d => formatDate(d)).join(', ') : 'You have added this company and title before'}.</p>
             ` : ''}
           </div>
           <div style="display:flex;flex-direction:column;gap:16px;align-items:flex-end;flex:none">
