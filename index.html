@@ -698,7 +698,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '20';
+const APP_VERSION = '21';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -739,7 +739,11 @@ function uniqueValue(base, taken) {
 const COMPANY_NOISE = new Set([
   'client', 'via', 'through', 'for', 'recruiting', 'recruitment', 'recruiters',
   'agency', 'staffing', 'talent', 'partners', 'search', 'group', 'consulting',
-  'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'the', 'and', 'on', 'behalf', 'of'
+  'inc', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'the', 'and', 'on', 'behalf', 'of',
+  // Placeholders, not names. Without these, "client unnamed" makes identifyingTokens()
+  // treat "unnamed" as the employer and discard the agency's real name, so two records
+  // for one job stop matching. See D-19.
+  'unnamed', 'undisclosed', 'confidential', 'unknown', 'anonymous', 'stealth', 'various'
 ]);
 function companyTokens(company) {
   const parts = String(company || '')
