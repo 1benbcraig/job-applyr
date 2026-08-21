@@ -474,6 +474,12 @@ function setApiKey(key) {
   catch (_) { return false; }
 }
 function hasApiKey() { return getApiKey().length > 0; }
+// A rejected key used to be unrecoverable from inside the app: the entry box
+// only renders when nothing is stored, so one bad paste locked the user out
+// with no way back except the browser console. See D-27.
+function clearApiKey() {
+  try { window.localStorage.removeItem(API_KEY_STORAGE); return true; } catch (_) { return false; }
+}
 
 async function gradePosting(postingText, sourceUrl) {
   const key = getApiKey();
@@ -698,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '23';
+const APP_VERSION = '24';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -707,11 +713,21 @@ const APP_VERSION = '23';
 const DUPE_MARK = '#8a3737';
 const DUPE_HIGHLIGHT = '#fbf0a3';
 
+// Claude reads the company name out of the posting, so the same employer can
+// come back "Ōura" one grading and "Oura" the next. Both are defensible, and
+// the ASCII filter below DELETES what it cannot match rather than folding it —
+// which turned those two into "ura" and "oura", two different companies, and a
+// duplicate pair that was never marked. Decomposing first splits Ō into O plus
+// a combining macron, and it is the macron that gets stripped. See D-26.
+function deaccent(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 // Storage keys can't contain whitespace, slashes, or quotes.
 function slugify(s) {
-  return String(s || '')
+  return deaccent(String(s || '')
     .split('(')[0]
-    .toLowerCase()
+    .toLowerCase())
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 60) || 'unknown';
@@ -746,8 +762,8 @@ const COMPANY_NOISE = new Set([
   'unnamed', 'undisclosed', 'confidential', 'unknown', 'anonymous', 'stealth', 'various'
 ]);
 function companyTokens(company) {
-  const parts = String(company || '')
-    .toLowerCase()
+  const parts = deaccent(String(company || '')
+    .toLowerCase())
     .replace(/\bon behalf of\b/g, '|')
     .split(/[()\[\],:;\/|]|\bvia\b|\bclient\b|\bfor\b|\bthrough\b/)
     .map(p => p.replace(/[^a-z0-9]+/g, ' ').trim())
@@ -796,9 +812,26 @@ function matchKeyFor(job) {
   return slugify(job.company) + '|' + slugify(job.title);
 }
 
-// Same role if the title matches and the two company strings name any company
-// in common. Falls back to the plain key when no usable tokens survive.
+// The strongest duplicate signal there is, and the only one that does not
+// depend on what Claude decided to call the company or the role: the posting
+// text the user actually pasted. Exact match after whitespace normalisation, so
+// two different roles that share boilerplate stay different. Short postings are
+// ignored — a stub must not collide with another stub. See D-26.
+function postingFingerprint(job) {
+  const t = String((job && job.fullPosting) || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return t.length >= 200 ? t : '';
+}
+
+// Same role if the posting text is identical, or the title matches and the two
+// company strings name any company in common. Falls back to the plain key when
+// no usable tokens survive.
 function isSameRole(a, b) {
+  const fa = postingFingerprint(a), fb = postingFingerprint(b);
+  if (fa && fb) return fa === fb || sameTitleAndCompany(a, b);
+  return sameTitleAndCompany(a, b);
+}
+
+function sameTitleAndCompany(a, b) {
   if (slugify(a.title) !== slugify(b.title)) return false;
   const ta = identifyingTokens(a.company), tb = identifyingTokens(b.company);
   if (!ta.size || !tb.size) return matchKeyFor(a) === matchKeyFor(b);
@@ -1325,225 +1358,6 @@ function repairJobIds(jobs) {
   return repaired;
 }
 
-// ---- Job Applyr 1 import: 84 record folders on disk, read once ----
-// D-18 as amended by D-20 and D-21. The source folder is opened read-only and
-// is never written to.
-
-// Recorded alongside the other one-time migrations. A second run would not
-// overwrite the first: normalizeJob() makes both identifiers unique (D-13), so
-// it would ADD 84 more rows, every one of them marked D. See D-20 §8.
-const IMPORT_FLAG = 'importJobApplyr1V1';
-
-// The six files a Job Applyr 1 record folder can hold. Read by exact name, so
-// the .bak- copies sitting in some folders are ignored without a rule.
-const IMPORT_OPTIONAL_FILES = ['posting.md', 'status.md', 'resume.md', 'coverletter.md'];
-
-// Tolerant on purpose, and lifted from subfolder-probe.html, which was run
-// against all 84 real records before this build existed. Three real shapes:
-//   74 analysis.md and 56 status.md open and close with ---
-//   10 analysis.md open with --- and never close
-//   28 status.md have no --- lines at all, keys from line 1
-// A conventional /^---\n(...)\n---/ parser returns nothing for the last two
-// groups — 10 job records and 28 status records, including 7 of the 17 applied
-// flags — and it fails quietly. See D-20 §1.
-//
-// ONE addition to the probe's version. verdict_reasoning is a YAML block scalar
-// ("verdict_reasoning: |") in 56 of the 84, with its real text on the indented
-// lines below. The probe only ever counted keys, so reading the value back as
-// "|" cost it nothing; an import built on it would have written the single
-// character "|" into notes on 56 records. Block scalars are now consumed.
-function importFrontmatter(text) {
-  const rows = String(text || '').split(/\r?\n/);
-  let i = 0, hadOpen = false, closed = false;
-  if (rows.length && rows[0].trim() === '---') { i = 1; hadOpen = true; }
-  const out = {};
-  for (; i < rows.length; i++) {
-    const L = rows[i];
-    if (L.trim() === '---') { closed = true; break; }
-    if (/^#{2,6}\s/.test(L)) break;   // a markdown section heading = the body has started
-    if (/^#/.test(L)) continue;       // a comment line
-    const mm = L.match(/^([A-Za-z0-9_]+):[ \t]*(.*)$/);
-    if (!mm) continue;
-    const key = mm[1];
-    let value = mm[2].trim();
-    if (/^[|>][-+0-9]*$/.test(value)) {
-      // The value is the indented lines that follow. Column 0 ends the block.
-      const block = [];
-      let j = i + 1;
-      for (; j < rows.length; j++) {
-        if (rows[j].trim() === '') { block.push(''); continue; }
-        if (!/^[ \t]/.test(rows[j])) break;
-        block.push(rows[j].replace(/^[ \t]+/, ''));
-      }
-      i = j - 1;
-      value = block.join('\n').trim();
-    } else {
-      value = value.replace(/^["']/, '').replace(/["']$/, '');
-    }
-    // First occurrence wins. A body line reading "Gap:" or "Concerns:" looks
-    // like a key and must not overwrite the real one.
-    if (!Object.prototype.hasOwnProperty.call(out, key)) out[key] = value;
-  }
-  out.__shape = hadOpen ? (closed ? 'delimited-closed' : 'delimited-unclosed') : 'no-delimiters';
-  return out;
-}
-
-// A missing optional file is not an error; anything else is.
-async function importReadIfPresent(dirHandle, name) {
-  try {
-    const fh = await dirHandle.getFileHandle(name);
-    const f = await fh.getFile();
-    return await f.text();
-  } catch (e) {
-    if (e && (e.name === 'NotFoundError' || e.name === 'TypeMismatchError')) return null;
-    throw e;
-  }
-}
-
-// The lines under one "## Heading", up to the next "##" or the end of the file.
-function importSection(text, heading) {
-  const rows = String(text || '').split(/\r?\n/);
-  const head = new RegExp('^##\\s+' + heading + '\\s*$', 'i');
-  const start = rows.findIndex(r => head.test(r));
-  if (start === -1) return [];
-  const out = [];
-  for (let i = start + 1; i < rows.length; i++) {
-    if (/^##\s/.test(rows[i])) break;
-    out.push(rows[i]);
-  }
-  return out;
-}
-function importStripBullet(line) {
-  return String(line || '').replace(/^\s*(?:[-*•]|\d+\.)\s+/, '').trim();
-}
-
-// Every non-empty line of a fit section becomes one item, verbatim, with no
-// tone. Six analyzer versions wrote these sections differently and only about a
-// third use bullets, so a tone inferred from a "Strong:" or "Gap:" prefix would
-// assert a judgement the source never made. readToneItem() takes a plain string
-// and renders it as a plain grey bullet, deliberately smaller than a toned one.
-// See D-20 §5.
-function importFitItems(text, heading) {
-  return importSection(text, heading).map(importStripBullet).filter(Boolean);
-}
-
-// "contract-to-hire, no salary listed" is two flags. Commas inside brackets
-// belong to the text — "annualized base $175,140" is one flag, not two.
-// A literal "none" is not a flag; 56 of the 84 records carry a real one.
-function importFlags(raw) {
-  const s = String(raw || '').trim();
-  if (!s || s === '[]' || /^none$/i.test(s)) return { flagReason: '', flagCount: 0 };
-  const parts = [];
-  let depth = 0, cur = '';
-  for (const ch of s) {
-    if (ch === '(' || ch === '[') depth++;
-    else if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
-    if (ch === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
-    cur += ch;
-  }
-  parts.push(cur);
-  return { flagReason: s, flagCount: parts.map(p => p.trim()).filter(Boolean).length };
-}
-
-// portfolio_picks is a JSON array in status.md, non-empty in 5 of the 84.
-// Lite regenerates portfolio guidance whenever materials are drafted, so for
-// the other 79 this is a field that fills itself the moment it matters.
-// The prose sections are deliberately not parsed. See D-20 §7.
-function importPortfolioPicks(raw) {
-  const s = String(raw || '').trim();
-  if (!s || s === '[]' || s === 'null') return [];
-  let names = [];
-  try {
-    const v = JSON.parse(s);
-    if (Array.isArray(v)) names = v.map(x => String(x == null ? '' : x).trim());
-  } catch (_) {
-    names = s.replace(/^\[/, '').replace(/\]$/, '').split(',')
-      .map(x => x.trim().replace(/^["']/, '').replace(/["']$/, ''));
-  }
-  return names.filter(Boolean).map(n => ({ useCase: n, justification: '' }));
-}
-
-// status.md's manual_verdict is the user's own correction. It is non-empty in
-// 27 records and disagrees with the analyzer in 25 of them — 14 Flag→Reject,
-// 9 Flag→Apply, 2 Apply→Reject. The analyzer's verdict is a first guess; the
-// person who owns the outcome overruled it, and that is the newer fact.
-// Importing on the analyzer's verdict alone put 25 jobs in the wrong bucket.
-// See D-20 §2.
-function importEffectiveVerdict(fm, sf) {
-  const manual = String((sf && sf.manual_verdict) || '').trim();
-  const auto = String((fm && fm.verdict) || '').trim();
-  return (manual || auto).toUpperCase();
-}
-
-// Scores are 0-100 integers in all 84 records today, so parsingError should
-// never fire. If it does, the record needs looking at rather than waving
-// through: the detail view swaps the score for "score unavailable" and says
-// which field could not be read.
-function importScore(raw) {
-  const n = parseInt(String(raw == null ? '' : raw).trim(), 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-// One record folder -> the raw object normalizeJob() expects. Pure: no storage,
-// no handles, so it can be run over the real folders outside the browser.
-function importRecordToRaw(files) {
-  const fm = importFrontmatter(files.analysis);
-  const sf = files.status ? importFrontmatter(files.status) : {};
-  const verdict = importEffectiveVerdict(fm, sf);
-  const applied = String(sf.applied || '').trim().toLowerCase() === 'true';
-  const qual = importScore(fm.qualification_fit_score);
-  const env = importScore(fm.environment_fit_score);
-  const flags = importFlags(fm.verdict_flags);
-
-  const reasoning = String(fm.verdict_reasoning || '').trim();
-  const manualReason = String(sf.manual_verdict_reason || '').trim();
-  const notes = [reasoning, manualReason ? 'Manual verdict reason: ' + manualReason : '']
-    .filter(Boolean).join('\n\n');
-
-  const raw = {
-    company: fm.company || 'Unknown',
-    title: fm.role_title || 'Untitled role',
-    location: fm.location || '',
-    salary: fm.salary_range || 'Not listed',
-    sourceUrl: fm.url || '',
-    verdict: verdict,
-    // An applied job stays in Applied whatever its outcome. response_status
-    // carries the outcome, and the Applied tab groups employer rejections to
-    // the bottom under their own heading. The rejected BUCKET means the user
-    // rejected the job; "Rejected by employer" means they rejected him. Two
-    // different facts, two different places. See D-21.
-    bucket: applied ? 'applied' : (VERDICT_BUCKET[verdict] || 'unassigned'),
-    qualFit: qual == null ? 0 : qual,
-    envFit: env == null ? 0 : env,
-    flagReason: flags.flagReason,
-    flagCount: flags.flagCount,
-    notes: notes,
-    qualItems: importFitItems(files.analysis, 'Qualification Fit'),
-    envItems: importFitItems(files.analysis, 'Environment Fit'),
-    openQuestions: importSection(files.analysis, 'Open Questions')
-      .map(importStripBullet).filter(Boolean).join('\n'),
-    portfolioGuidance: importPortfolioPicks(sf.portfolio_picks),
-    fullPosting: files.posting || '',
-    // Written by a Node process in the user's own timezone, so these are
-    // already local calendar days. Carried across as written and never
-    // re-derived. See D-16 and D-18 §3.
-    addedDate: fm.date_evaluated || '',
-    postedDateIso: fm.date_evaluated || '',
-    appliedDate: applied ? String(sf.date_applied || '').trim() : '',
-    response_status: applied ? (String(sf.response_status || '').trim().toLowerCase() || 'none') : 'none',
-    interview_date: applied ? String(sf.interview_date || '').trim() : '',
-    // Documents carry over on applied jobs only. For a job already applied to,
-    // the letter is the record of what was actually sent. For one not yet
-    // applied, D-05's never-overwrite guard would leave a stale letter sitting
-    // there permanently, blocking a fresh draft. See D-18 §2.
-    resume: applied ? (files.resume || '') : '',
-    coverletter: applied ? (files.coverletter || '') : ''
-  };
-  // Left absent rather than set false, so the field means what it says.
-  if (qual == null || env == null) raw.parsingError = true;
-  return raw;
-}
-
 class App {
   constructor() {
     this.state = {
@@ -1554,8 +1368,7 @@ class App {
       questionsEditing: false, resumeEditing: false, coverEditing: false,
       uploadText: '', uploadUrl: '', dragOver: false, toast: '',
       pending: [], analyzing: false, analyzeDone: 0, analyzeTotal: 0, analyzeErrors: [], gradeError: '',
-      jobs: [], loading: true, storageError: '',
-      importing: false, importProgress: 0, importDone: null, importError: ''
+      jobs: [], loading: true, storageError: ''
     };
     this.render();
     this.boot();
@@ -1583,7 +1396,7 @@ class App {
       // One-time only: the recompute is O(n²) in stored jobs, and re-running it
       // every launch would also quietly rewrite history whenever a row is deleted.
       const migrations = await store.getMigrations();
-      const needsRecompute = !migrations.duplicateCheckV1;
+      const needsRecompute = !migrations.duplicateCheckV2;
       if (needsRecompute) {
         const rechecked = recomputeDuplicateChecks(jobs);
         console.log('Recomputed duplicateCheck on ' + rechecked.length + ' record(s):',
@@ -1594,10 +1407,9 @@ class App {
       // Flag only after the writes land, so a failed save doesn't skip the
       // migration for good — a half-migrated run just re-runs next launch.
       if (dirty.size) await Promise.all([...dirty.values()].map(j => store.saveJob(j)));
-      if (needsRecompute) await store.saveMigrations(Object.assign({}, migrations, { duplicateCheckV1: true }));
+      if (needsRecompute) await store.saveMigrations(Object.assign({}, migrations, { duplicateCheckV2: true }));
       this.setState(Object.assign({
         jobs, pending, loading: false,
-        importDone: migrations[IMPORT_FLAG] || null,
         activeBucket: ui.activeBucket || 'ready',
         sortField: ui.sortField || 'posted',
         sortDir: ui.sortDir || 'desc'
@@ -1783,6 +1595,7 @@ class App {
           <button type="button" class="jd-nav-tab" style="${this.navTabStyle(isReview)}" onclick="app.setState({view:'review'})">Review</button>
           <button type="button" class="jd-nav-tab" style="${this.navTabStyle(view === 'upload')}" onclick="app.setState({view:'upload',toast:''})">Upload${pendingCount > 0 ? ' (' + pendingCount + ')' : ''}</button>
           <button type="button" class="jd-nav-tab" style="${this.navTabStyle(view === 'unassigned')}" onclick="app.setState({view:'unassigned'})">Unassigned${unassignedCount > 0 ? ' (' + unassignedCount + ')' : ''}</button>
+          <span class="text-muted" style="margin-left:auto;font-size:12px" title="Build version">_${APP_VERSION}</span>
         </div>
       </nav>
     `;
@@ -1822,35 +1635,6 @@ class App {
             ${(profileSource.missing && profileSource.missing.length) ? `<p style="font-size:13px;color:var(--color-flagged-700);margin:0 0 var(--space-2)">Not found in that folder: ${escapeHtml(profileSource.missing.join(', '))}</p>` : ''}
             ${profileSource.error ? `<p style="font-size:13px;color:var(--color-rejected-700);margin:0 0 var(--space-2)">${escapeHtml(profileSource.error)}</p>` : ''}
           `}
-          ${(() => {
-            const done = this.state.importDone;
-            const busy = this.state.importing;
-            const err = this.state.importError;
-            if (done) {
-              const c = done.counts || {};
-              const r = done.responses || {};
-              return `
-                <div style="border:1px solid var(--color-neutral-300);padding:var(--space-4);margin:var(--space-4) 0">
-                  <p style="font-size:14px;font-weight:600;margin:0 0 var(--space-1)">Existing job records: imported</p>
-                  <p class="text-muted" style="font-size:14px;margin:0 0 var(--space-1)">${done.added} record${done.added === 1 ? '' : 's'} added on ${escapeHtml(formatDate(done.ranAt) || done.ranAt)}: ${c.rejected || 0} Rejected, ${c.applied || 0} Applied, ${c.ready || 0} Ready to Apply, ${c.flagged || 0} Flagged, ${c.unassigned || 0} Unassigned.</p>
-                  <p class="text-muted" style="font-size:14px;margin:0 0 var(--space-1)">Inside Applied: ${r.interview || 0} interview scheduled, ${r.none || 0} no response, ${r.rejected || 0} rejected by employer.</p>
-                  ${done.unreadable ? `<p style="font-size:14px;color:var(--color-rejected-700);margin:0 0 var(--space-1)">${done.unreadable} record${done.unreadable === 1 ? '' : 's'} had a fit score that could not be read. Those show a warning in place of the score.</p>` : ''}
-                  ${(done.skipped && done.skipped.length) ? `<p class="text-muted" style="font-size:13px;margin:0 0 var(--space-1)">Skipped, no analysis.md inside: ${escapeHtml(done.skipped.join(', '))}</p>` : ''}
-                  <p class="text-muted" style="font-size:13px;margin:0">This runs once. Running it again would add a second copy of every record rather than replacing them, so the button is gone.</p>
-                  ${err ? `<p style="font-size:14px;color:var(--color-rejected-700);margin:var(--space-2) 0 0">${escapeHtml(err)}</p>` : ''}
-                </div>
-              `;
-            }
-            return `
-              <div style="border:1px solid var(--color-neutral-300);padding:var(--space-4);margin:var(--space-4) 0">
-                <p style="font-size:14px;font-weight:600;margin:0 0 var(--space-1)">One-time setup: import your existing job records</p>
-                <p class="text-muted" style="font-size:14px;margin:0 0 var(--space-2)">If you tracked jobs before this app, point it at the folder holding one folder per job. It reads them and adds them here, with their verdicts, scores, notes and postings. Applied jobs keep the resume and cover letter that were actually sent.</p>
-                <p class="text-muted" style="font-size:13px;margin:0 0 var(--space-2)">The original folder is only read. Nothing in it is changed, moved or deleted. This can only be done once.</p>
-                <button type="button" class="btn btn-secondary" ${busy ? 'disabled' : ''} onclick="app.importFromDisk();return false;">${busy ? `Reading… ${this.state.importProgress} record${this.state.importProgress === 1 ? '' : 's'}` : 'Choose the folder'}</button>
-                ${err ? `<p style="font-size:14px;color:var(--color-rejected-700);margin:var(--space-2) 0 0">${escapeHtml(err)}</p>` : ''}
-              </div>
-            `;
-          })()}
           ${!hasApiKey() ? `
             <div style="border:1px solid var(--color-neutral-300);padding:var(--space-4);margin:var(--space-4) 0">
               <p style="font-size:14px;font-weight:600;margin:0 0 var(--space-1)">One-time setup: add an API key</p>
@@ -1860,7 +1644,12 @@ class App {
                 <button type="button" class="btn btn-secondary" onclick="app.saveApiKey();return false;">Save key</button>
               </div>
             </div>
-          ` : ''}
+          ` : `
+            <p class="text-muted" style="font-size:13px;margin:0 0 var(--space-2);display:flex;align-items:center;gap:var(--space-2)">
+              <span>API key saved</span>
+              <button type="button" class="btn btn-ghost" style="font-size:13px" onclick="app.changeApiKey();return false;">Change key</button>
+            </p>
+          `}
           <div class="field" style="padding-top:24px;padding-bottom:var(--space-2)">
             <label for="jd-url" style="display:block;font-size:14px;color:var(--color-neutral-700);margin-bottom:var(--space-1)">Source URL (optional)</label>
             <input id="jd-url" class="input" type="url" placeholder="https://www.linkedin.com/jobs/view/..." value="${escapeHtml(uploadUrl)}" ${busy ? 'disabled' : ''} oninput="app.state.uploadUrl=this.value">
@@ -1881,6 +1670,11 @@ class App {
         </div>
       </main>
     `;
+  }
+
+  changeApiKey() {
+    clearApiKey();
+    this.setState({ toast: 'Key cleared. Paste a new one below.' });
   }
 
   saveApiKey() {
@@ -2204,119 +1998,6 @@ class App {
     try { await loadProfile(true); }
     catch (e) { profileSource.error = e && e.message ? e.message : String(e); }
     this.render();
-  }
-
-  // Reads Job Applyr 1's record folders and adds them as Lite jobs. A click
-  // handler on purpose: Chrome only opens the folder picker from a real gesture.
-  async importFromDisk() {
-    if (this.state.importing || this.state.importDone) return;
-    if (typeof window.showDirectoryPicker !== 'function') {
-      this.setState({ importError: 'This browser cannot open a folder picker. Chrome is required.' });
-      return;
-    }
-
-    let dir;
-    try {
-      // A separate picker id from the profile folder, so Chrome offers the
-      // right starting directory for each and neither overwrites the other.
-      dir = await window.showDirectoryPicker({ id: 'ja-lite-import', mode: 'read' });
-    } catch (e) {
-      if (e && e.name === 'AbortError') return;   // the user closed the picker
-      this.setState({ importError: e && e.message ? e.message : String(e) });
-      return;
-    }
-
-    this.setState({ importing: true, importError: '', importProgress: 0, toast: '' });
-
-    // Read everything first, write second. The read is where a permission
-    // problem or the wrong folder shows up, and failing there leaves storage
-    // untouched. 311 files came back in 135 ms on the real data, so holding
-    // them costs nothing. What happens if a WRITE fails halfway is untested:
-    // the flag is recorded with however many records actually saved and the
-    // failures are named on screen, because re-running is not a recovery path.
-    const found = [];
-    const skipped = [];
-    const readErrors = [];
-    try {
-      for await (const entry of dir.values()) {
-        if (entry.kind !== 'directory') continue;
-        let analysis = null;
-        try { analysis = await importReadIfPresent(entry, 'analysis.md'); }
-        catch (e) { readErrors.push(entry.name + '/analysis.md — ' + e.name); continue; }
-        // A subfolder with no analysis.md is not a job record.
-        if (analysis === null) { skipped.push(entry.name); continue; }
-        const files = { analysis: analysis };
-        for (let i = 0; i < IMPORT_OPTIONAL_FILES.length; i++) {
-          const name = IMPORT_OPTIONAL_FILES[i];
-          try { files[name.replace(/\.md$/, '')] = await importReadIfPresent(entry, name); }
-          catch (e) { readErrors.push(entry.name + '/' + name + ' — ' + e.name); }
-        }
-        found.push({ folder: entry.name, files: files });
-        this.setState({ importProgress: found.length });
-      }
-    } catch (e) {
-      this.setState({ importing: false, importError: 'Could not read that folder: '
-        + (e && e.message ? e.message : String(e)) + '. Nothing was imported.' });
-      return;
-    }
-
-    if (!found.length) {
-      this.setState({ importing: false, importError: 'No job records in that folder. Pick the applications folder itself — the one holding a folder per job, each with an analysis.md inside.' });
-      return;
-    }
-
-    // Every record goes through normalizeJob() against the list built so far,
-    // so storageKey and id are made unique in one place and the duplicate check
-    // sees only the records that came before it. Job Applyr 1's folder names
-    // repeat, so they are not unique enough to trust. See D-12 and D-13.
-    //
-    // ORDER IS THE ANSWER HERE, so it is fixed before anything is created.
-    // buildDuplicateCheck() marks a record when it has already seen a matching
-    // one, so the D lands on whichever of a pair is created second — and
-    // dir.values() makes no promise about order. On the first real run it
-    // handed back the newer record of every pair first, which put all three
-    // marks on the OLDER row, the opposite of D-14's rule. Sorting by the
-    // evaluated date is the same thing recomputeDuplicateChecks() does when it
-    // sorts by storageKey; the folder name breaks a same-day tie so two
-    // postings from one company on one day are still deterministic. See D-24.
-    const ordered = found
-      .map(rec => ({ folder: rec.folder, raw: importRecordToRaw(rec.files) }))
-      .sort((a, b) => String(a.raw.addedDate || '').localeCompare(String(b.raw.addedDate || ''))
-                      || String(a.folder).localeCompare(String(b.folder)));
-
-    const jobs = this.state.jobs.slice();
-    const added = [];
-    const saveFailures = [];
-    for (let i = 0; i < ordered.length; i++) {
-      const job = normalizeJob(ordered[i].raw, jobs);
-      if (await store.saveJob(job)) { jobs.push(job); added.push(job); }
-      else saveFailures.push(ordered[i].folder);
-      this.setState({ importProgress: i + 1 });
-    }
-
-    const counts = { rejected: 0, applied: 0, ready: 0, flagged: 0, unassigned: 0 };
-    const responses = { interview: 0, none: 0, rejected: 0 };
-    added.forEach(j => {
-      counts[j.bucket] = (counts[j.bucket] || 0) + 1;
-      if (j.bucket === 'applied') responses[j.response_status] = (responses[j.response_status] || 0) + 1;
-    });
-
-    const summary = {
-      ranAt: todayLocal(), added: added.length, found: found.length,
-      counts: counts, responses: responses, skipped: skipped,
-      unreadable: added.filter(j => j.parsingError).length
-    };
-    const migrations = await store.getMigrations();
-    const next = Object.assign({}, migrations);
-    next[IMPORT_FLAG] = summary;
-    await store.saveMigrations(next);
-
-    this.setState({
-      importing: false, jobs: jobs, importDone: summary,
-      importError: saveFailures.length
-        ? saveFailures.length + ' record' + (saveFailures.length > 1 ? 's' : '') + ' could not be saved: ' + saveFailures.join(', ')
-        : (readErrors.length ? readErrors.length + ' file(s) could not be read: ' + readErrors.join('; ') : '')
-    });
   }
 
   openJob(id) {
