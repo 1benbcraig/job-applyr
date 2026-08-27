@@ -10,8 +10,8 @@ one, **this one wins** — it is the only one read from the code.
 | | |
 |---|---|
 | Source | `index.html` |
-| `APP_VERSION` | **24** |
-| Size | 2,310 lines, 370,572 bytes |
+| `APP_VERSION` | **25** |
+| Size | 2,338 lines, 372,007 bytes |
 
 **To regenerate:** `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
@@ -165,6 +165,7 @@ Every `app.*` handler reachable from the interface:
 - `handleSave()` — saves the open editor
 - `moveJob()` — moves a job to another bucket, stamping `rejectedDate` on the way into Rejected
 - `openJob()` — opens the detail view
+- `openReasonPanel()` — **undocumented — add a line to NOTES in behaviour-map.js**
 - `regenerateDoc()` — clears one document then redrafts it — confirms first, and hand edits do not survive
 - `reloadProfile()` — re-reads the profile folder now
 - `runAnalysis()` — grades the pending postings
