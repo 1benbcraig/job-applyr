@@ -704,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '24';
+const APP_VERSION = '25';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -1855,7 +1855,17 @@ class App {
       else if (sd === 'title') cmp = a.title.localeCompare(b.title);
       else if (sd === 'salary') cmp = parseSalary(a.salary) - parseSalary(b.salary);
       else if (sd === 'flags') cmp = (a.flagCount || 0) - (b.flagCount || 0);
-      else cmp = new Date(a.postedDateIso || 0) - new Date(b.postedDateIso || 0);
+      // The date column shows the applied date in Applied and the rejected date
+      // in Rejected, so the comparator picks its field the same way renderRow
+      // does. Sorting everything by postedDateIso put those two tabs visibly out
+      // of order (D-29). A record with no date for its bucket falls back to the
+      // posted date rather than sorting as epoch zero and clumping at one end.
+      else {
+        const sortDateOf = (j) => (activeBucket === 'applied' ? j.appliedDate
+          : activeBucket === 'rejected' ? j.rejectedDate
+          : '') || j.postedDateIso || 0;
+        cmp = new Date(sortDateOf(a)) - new Date(sortDateOf(b));
+      }
       return dir === 'desc' ? -cmp : cmp;
     });
 
@@ -1957,6 +1967,24 @@ class App {
   setBucket(bucket) {
     this.setState({ activeBucket: bucket });
     this.persistUi();
+  }
+
+  // Opens the Flag or Reject panel in the job detail view, prefilled with the
+  // record's existing flag reason. The reason is read here, from the record,
+  // because the buttons used to paste it straight into their own onclick as a
+  // JavaScript string literal: any apostrophe, double quote, newline or
+  // backslash in the stored text made the attribute malformed and the button
+  // silently did nothing. Flagged records always carry a reason, so they always
+  // failed. Passing the id keeps stored text out of a script context entirely
+  // rather than escaping one instance of the problem (D-28).
+  openReasonPanel(id, which) {
+    const job = this.state.jobs.find(j => j.id === id);
+    const reason = (job && job.flagReason) || '';
+    if (which === 'flag') {
+      this.setState({ flaggingOpen: true, rejectingOpen: false, applyingOpen: false, flagReasonInput: reason });
+    } else {
+      this.setState({ rejectingOpen: true, flaggingOpen: false, applyingOpen: false, rejectReasonInput: reason });
+    }
   }
 
   // Delete is offered only on rows marked as duplicates — the one case where a
@@ -2199,8 +2227,8 @@ class App {
                 <div style="width:1px;align-self:stretch;background:var(--color-divider)"></div>
               ` : ''}
               <div style="display:flex;gap:8px">
-                <button type="button" class="btn btn-ghost" onclick="app.setState({flaggingOpen:true,rejectingOpen:false,applyingOpen:false,flagReasonInput:'${escapeHtml(job.flagReason || '')}'});return false;">Flag</button>
-                <button type="button" class="btn btn-ghost jd-btn-reject" onclick="app.setState({rejectingOpen:true,flaggingOpen:false,applyingOpen:false,rejectReasonInput:'${escapeHtml(job.flagReason || '')}'});return false;">Reject</button>
+                <button type="button" class="btn btn-ghost" onclick="app.openReasonPanel('${job.id}','flag');return false;">Flag</button>
+                <button type="button" class="btn btn-ghost jd-btn-reject" onclick="app.openReasonPanel('${job.id}','reject');return false;">Reject</button>
                 <button type="button" class="btn btn-primary" onclick="app.moveJob('${job.id}','applied');return false;">Mark Applied</button>
               </div>
             </div>
