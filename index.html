@@ -704,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '25';
+const APP_VERSION = '26';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -964,6 +964,129 @@ const store = {
   async saveMigrations(obj) {
     try { await this._set(MIGRATION_KEY, JSON.stringify(obj)); return true; }
     catch (e) { console.error('Failed to record migration:', e); return false; }
+  }
+};
+
+// ---- backup: a copy of the records in a file the user holds ----
+// Everything this app knows lives in browser storage. Chrome's "Clear browsing
+// data" removes that along with the cache, in one click, with no warning that
+// anything irreplaceable is inside. On 2026-09-17 it took roughly 100 job
+// records with it. This writes the whole set to a file the user keeps, and
+// reads that file back.
+//
+// The API key is deliberately NOT in the file. It is a secret, the file lands
+// in Downloads, and a key can be reissued in a minute. A job record cannot.
+const BACKUP_FORMAT = 'job-applyr-lite-backup';
+const BACKUP_FORMAT_VERSION = 1;
+const BACKUP_META_KEY = 'meta:backup';
+
+const backup = {
+  async collect() {
+    const [jobs, pending, ui, migrations] = await Promise.all([
+      store.listJobs(), store.listPending(), store.getUiState(), store.getMigrations()
+    ]);
+    return {
+      format: BACKUP_FORMAT,
+      formatVersion: BACKUP_FORMAT_VERSION,
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      counts: { jobs: jobs.length, pending: pending.length },
+      jobs, pending, ui, migrations
+    };
+  },
+
+  async readMeta() {
+    try { const v = await store._get(BACKUP_META_KEY); return v ? JSON.parse(v) : {}; }
+    catch (e) { return {}; }
+  },
+  async writeMeta(obj) {
+    try { await store._set(BACKUP_META_KEY, JSON.stringify(obj)); return true; }
+    catch (e) { return false; }
+  },
+
+  filename() { return 'job-applyr-backup-' + todayLocal() + '.json'; },
+
+  async saveToFile() {
+    const data = await this.collect();
+    const name = this.filename();
+    downloadBlob(name, new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const meta = await this.readMeta();
+    await this.writeMeta(Object.assign({}, meta, {
+      lastFileAt: data.exportedAt, lastFileName: name, lastFileCount: data.counts.jobs
+    }));
+    return { name, counts: data.counts };
+  },
+
+  // The whole file is checked before a single record is written. A file that
+  // does not parse, or that is missing its job list, or that holds a record
+  // with no usable key, is refused outright — a half-import is worse than no
+  // import, because it looks like it worked.
+  parse(text) {
+    let data;
+    try { data = JSON.parse(text); }
+    catch (e) { throw new Error('That file could not be read as a backup: it is not valid JSON. Nothing was changed.'); }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('That file is not a Job Applyr backup. Nothing was changed.');
+    }
+    if (data.format !== BACKUP_FORMAT) {
+      throw new Error('That file is not a Job Applyr backup. Nothing was changed.');
+    }
+    if (!(Number(data.formatVersion) <= BACKUP_FORMAT_VERSION)) {
+      throw new Error('That backup was written by a newer build of the app than this one. Update the app first. Nothing was changed.');
+    }
+    if (!Array.isArray(data.jobs)) {
+      throw new Error('That backup has no list of jobs in it, so there is nothing to restore. Nothing was changed.');
+    }
+    const badKey = r => !r || typeof r !== 'object' || Array.isArray(r) || typeof r.storageKey !== 'string';
+    if (data.jobs.some(r => badKey(r) || r.storageKey.indexOf(JOB_PREFIX) !== 0)) {
+      throw new Error('That backup holds a job record with no usable key, so it is not safe to restore. Nothing was changed.');
+    }
+    const pending = Array.isArray(data.pending) ? data.pending : [];
+    if (pending.some(r => badKey(r) || r.storageKey.indexOf(PENDING_PREFIX) !== 0)) {
+      throw new Error('That backup holds a saved posting with no usable key, so it is not safe to restore. Nothing was changed.');
+    }
+    const obj = v => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    return {
+      jobs: data.jobs, pending,
+      ui: obj(data.ui), migrations: obj(data.migrations),
+      exportedAt: data.exportedAt || ''
+    };
+  },
+
+  // Merge, never wipe. A record in both places is taken from the file: the file
+  // is the copy that survived, and the browser's is whatever a wipe left behind.
+  async restore(parsed) {
+    const haveJob = new Set((await store.listJobs()).map(j => j.storageKey));
+    const havePending = new Set((await store.listPending()).map(p => p.storageKey));
+
+    let jobsAdded = 0, jobsReplaced = 0, pendingAdded = 0, pendingReplaced = 0;
+    for (const rec of parsed.jobs) {
+      // "generating" is a live-run flag, the same reason persistJob() strips it.
+      const ok = await store.saveJob(Object.assign({}, rec, { generating: false }));
+      if (!ok) throw new Error('writing ' + rec.storageKey + ' failed');
+      if (haveJob.has(rec.storageKey)) jobsReplaced++; else jobsAdded++;
+    }
+    for (const rec of parsed.pending) {
+      const ok = await store.savePending(rec);
+      if (!ok) throw new Error('writing ' + rec.storageKey + ' failed');
+      if (havePending.has(rec.storageKey)) pendingReplaced++; else pendingAdded++;
+    }
+
+    // Meta is only taken from the file when this browser has none of its own.
+    // A restore should not undo a sort order, and it must not un-run a
+    // migration that has already run here.
+    const ui = await store.getUiState();
+    if (!ui || !Object.keys(ui).length) await store.saveUiState(parsed.ui);
+    const migrations = await store.getMigrations();
+    await store.saveMigrations(Object.assign({}, parsed.migrations, migrations));
+
+    // A restore can collide ids with records already here. This is the same
+    // repair boot() runs, for the same reason (D-12).
+    const jobs = await store.listJobs();
+    const repaired = repairJobIds(jobs);
+    if (repaired.length) await Promise.all(repaired.map(j => store.saveJob(j)));
+
+    return { jobsAdded, jobsReplaced, pendingAdded, pendingReplaced, total: jobs.length };
   }
 };
 
@@ -1368,7 +1491,8 @@ class App {
       questionsEditing: false, resumeEditing: false, coverEditing: false,
       uploadText: '', uploadUrl: '', dragOver: false, toast: '',
       pending: [], analyzing: false, analyzeDone: 0, analyzeTotal: 0, analyzeErrors: [], gradeError: '',
-      jobs: [], loading: true, storageError: ''
+      jobs: [], loading: true, storageError: '',
+      backupMeta: {}, backupMessage: '', backupError: ''
     };
     this.render();
     this.boot();
@@ -1378,6 +1502,7 @@ class App {
     await store.init();
     try {
       const [jobs, pending, ui] = await Promise.all([store.listJobs(), store.listPending(), store.getUiState()]);
+      const backupMeta = await backup.readMeta();
       console.log('Job Applyr Lite build _' + APP_VERSION);
 
       // Profile first: grading and drafting are meaningless without it, and the
@@ -1409,7 +1534,7 @@ class App {
       if (dirty.size) await Promise.all([...dirty.values()].map(j => store.saveJob(j)));
       if (needsRecompute) await store.saveMigrations(Object.assign({}, migrations, { duplicateCheckV2: true }));
       this.setState(Object.assign({
-        jobs, pending, loading: false,
+        jobs, pending, backupMeta, loading: false,
         activeBucket: ui.activeBucket || 'ready',
         sortField: ui.sortField || 'posted',
         sortDir: ui.sortDir || 'desc'
@@ -1635,6 +1760,7 @@ class App {
             ${(profileSource.missing && profileSource.missing.length) ? `<p style="font-size:13px;color:var(--color-flagged-700);margin:0 0 var(--space-2)">Not found in that folder: ${escapeHtml(profileSource.missing.join(', '))}</p>` : ''}
             ${profileSource.error ? `<p style="font-size:13px;color:var(--color-rejected-700);margin:0 0 var(--space-2)">${escapeHtml(profileSource.error)}</p>` : ''}
           `}
+          ${this.backupLineHTML()}
           ${!hasApiKey() ? `
             <div style="border:1px solid var(--color-neutral-300);padding:var(--space-4);margin:var(--space-4) 0">
               <p style="font-size:14px;font-weight:600;margin:0 0 var(--space-1)">One-time setup: add an API key</p>
@@ -2026,6 +2152,86 @@ class App {
     try { await loadProfile(true); }
     catch (e) { profileSource.error = e && e.message ? e.message : String(e); }
     this.render();
+  }
+
+  // ---- backup controls, on the Upload tab beside the profile line ----
+  // The line is here so the screen always answers one question: if this browser
+  // were wiped right now, what would come back? Until the folder write exists,
+  // the honest answer is "only what you have saved by hand", and it says so.
+  backupLineHTML() {
+    const meta = this.state.backupMeta || {};
+    const when = meta.lastFileAt ? new Date(meta.lastFileAt) : null;
+    const n = Number(meta.lastFileCount || 0);
+    const never = !when || isNaN(when.getTime());
+    const message = never
+      ? 'Backup: off. Nothing is written outside this browser, so clearing Chrome’s browsing data would delete every job. No backup file has been saved yet.'
+      : 'Backup: manual only — a copy is written when you press Save a backup, not automatically. Last copy: '
+        + when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        + ', ' + when.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        + ' (' + n + ' job' + (n === 1 ? '' : 's') + ').';
+    return `
+      <p class="text-muted" style="font-size:13px;margin:0 0 var(--space-2);display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap">
+        <span style="${never ? 'color:var(--color-rejected-700)' : ''}">${escapeHtml(message)}</span>
+        <button type="button" class="btn btn-secondary" style="font-size:13px" onclick="app.saveBackupFile();return false;">Save a backup</button>
+        <button type="button" class="btn btn-ghost" style="font-size:13px" onclick="app.chooseBackupFile();return false;">Restore from a backup</button>
+      </p>
+      <input id="backup-file" type="file" accept=".json,application/json" style="display:none" onchange="app.restoreBackupFile(this);">
+      ${this.state.backupMessage ? `<p style="font-size:13px;color:var(--color-neutral-700);margin:0 0 var(--space-2)">${escapeHtml(this.state.backupMessage)}</p>` : ''}
+      ${this.state.backupError ? `<p style="font-size:13px;color:var(--color-rejected-700);margin:0 0 var(--space-2)">${escapeHtml(this.state.backupError)}</p>` : ''}
+    `;
+  }
+
+  async saveBackupFile() {
+    try {
+      const res = await backup.saveToFile();
+      const meta = await backup.readMeta();
+      this.setState({
+        backupMeta: meta, backupError: '',
+        backupMessage: 'Saved ' + res.name + ' to your Downloads folder — '
+          + res.counts.jobs + ' job' + (res.counts.jobs === 1 ? '' : 's')
+          + ' and ' + res.counts.pending + ' saved posting' + (res.counts.pending === 1 ? '' : 's') + '.'
+      });
+    } catch (e) {
+      this.setState({ backupMessage: '', backupError: 'The backup was not written: ' + (e && e.message ? e.message : String(e)) });
+    }
+  }
+
+  // The picker needs a real click, which this is one hop away from.
+  chooseBackupFile() {
+    const el = document.getElementById('backup-file');
+    if (!el) return;
+    el.value = '';
+    el.click();
+  }
+
+  async restoreBackupFile(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    let parsed;
+    try {
+      parsed = backup.parse(await file.text());
+    } catch (e) {
+      this.setState({ backupMessage: '', backupError: (e && e.message ? e.message : String(e)) });
+      return;
+    }
+    try {
+      const r = await backup.restore(parsed);
+      const [jobs, pending, meta] = await Promise.all([store.listJobs(), store.listPending(), backup.readMeta()]);
+      this.setState({
+        jobs, pending, backupMeta: meta, backupError: '',
+        backupMessage: 'Restored from ' + file.name + ': '
+          + r.jobsAdded + ' job' + (r.jobsAdded === 1 ? '' : 's') + ' added, '
+          + r.jobsReplaced + ' replaced. ' + r.total + ' job' + (r.total === 1 ? '' : 's') + ' in the tracker now.'
+      });
+    } catch (e) {
+      // Records written before the failure are still here; nothing was removed.
+      const jobs = await store.listJobs();
+      this.setState({
+        jobs, backupMessage: '',
+        backupError: 'The restore stopped partway (' + (e && e.message ? e.message : String(e))
+          + '). Nothing was deleted — there are ' + jobs.length + ' jobs in the tracker now. Try the restore again.'
+      });
+    }
   }
 
   openJob(id) {
