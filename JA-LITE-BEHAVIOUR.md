@@ -10,8 +10,8 @@ one, **this one wins** — it is the only one read from the code.
 | | |
 |---|---|
 | Source | `index.html` |
-| `APP_VERSION` | **27** |
-| Size | 2,828 lines, 396,093 bytes |
+| `APP_VERSION` | **28** |
+| Size | 2,991 lines, 403,003 bytes |
 
 **To regenerate:** `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
@@ -165,6 +165,28 @@ cannot be serialised into local storage.
 
 ---
 
+## Tabs, and what the app needs before it changes anything
+
+Navigation, left to right: **Upload**, **Review**, **Unassigned**, **Settings**.
+The app opens on `review`. **Unassigned is shown only when something is in it.**
+
+Setup lives on Settings. Until every requirement is met, every other tab shows one box
+headed **To use Job Applyr:** with one line per missing item:
+
+| Missing | Line shown |
+|---|---|
+| `storage` | open Job Applyr in a normal Chrome window, not a private one. |
+| `profileNone` | choose your profile folder on the *Settings tab* (a link) |
+| `profileLost` | reconnect your profile folder on the *Settings tab* (a link) |
+| `apiKey` | enter your API key on the *Settings tab* (a link) |
+| `backupOff` | turn on automatic backup on the *Settings tab* (a link) |
+| `backupFailed` | fix automatic backup on the *Settings tab* (a link) |
+
+**While any line shows, these refuse and their controls are greyed out:** `deleteJob()`, `generateMaterials()`, `handleSave()`, `moveJob()`, `openReasonPanel()`, `regenerateDoc()`, `runAnalysis()`, `saveDoc()`, `saveNotes()`, `setInterviewDate()`, `setResponseStatus()`, `startEditing()`, `updateJobField()`.
+Viewing stays open — switching buckets, sorting, opening a job, switching its tabs, exporting.
+
+---
+
 ## Everything the user can trigger
 
 Every `app.*` handler reachable from the interface:
@@ -192,6 +214,7 @@ Every `app.*` handler reachable from the interface:
 - `setInterviewDate()` — writes `interview_date` from the inline picker
 - `setResponseStatus()` — writes `response_status`, which is what regroups an applied row
 - `setState()` — generic interface state change
+- `showSettings()` — opens the Settings tab and clears its old messages — also what every "Settings tab" link in the requirements box does
 - `sortBy()` — sorts the list by a column
 - `startEditing()` — opens the rich-text editor on a document
 - `turnOnAutoBackup()` — asks Chrome for permission to write to the profile folder; granted, it writes a first copy and every later change is copied there; refused, the screen says so
