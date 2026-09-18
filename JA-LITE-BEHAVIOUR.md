@@ -10,8 +10,8 @@ one, **this one wins** — it is the only one read from the code.
 | | |
 |---|---|
 | Source | `index.html` |
-| `APP_VERSION` | **25** |
-| Size | 2,338 lines, 372,007 bytes |
+| `APP_VERSION` | **26** |
+| Size | 2,544 lines, 382,202 bytes |
 
 **To regenerate:** `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
@@ -142,6 +142,7 @@ Browser storage on the live origin. Nothing is sent anywhere but Anthropic.
 | `PENDING_PREFIX` | `pending:` |
 | `UI_STATE_KEY` | `ui:state` |
 | `MIGRATION_KEY` | `meta:migrations` |
+| `BACKUP_META_KEY` | `meta:backup` |
 
 One-time migrations recorded under the migrations key: `duplicateCheckV2`.
 
@@ -158,6 +159,7 @@ cannot be serialised into local storage.
 Every `app.*` handler reachable from the interface:
 
 - `changeApiKey()` — clears the stored key so the entry box comes back — the only in-app way to replace a rejected key
+- `chooseBackupFile()` — opens the file picker for restoring from a backup file
 - `chooseProfileFolder()` — opens the folder picker for the five profile files
 - `deleteJob()` — removes a record — offered on duplicate rows only, and it confirms first
 - `exportDoc()` — downloads the open document as PDF or Word
@@ -165,11 +167,13 @@ Every `app.*` handler reachable from the interface:
 - `handleSave()` — saves the open editor
 - `moveJob()` — moves a job to another bucket, stamping `rejectedDate` on the way into Rejected
 - `openJob()` — opens the detail view
-- `openReasonPanel()` — **undocumented — add a line to NOTES in behaviour-map.js**
+- `openReasonPanel()` — opens the flag or reject reason panel, reading the reason off the record
 - `regenerateDoc()` — clears one document then redrafts it — confirms first, and hand edits do not survive
 - `reloadProfile()` — re-reads the profile folder now
+- `restoreBackupFile()` — reads a backup file and merges it in — records in the file win, nothing is wiped
 - `runAnalysis()` — grades the pending postings
 - `saveApiKey()` — stores the Anthropic key in this browser
+- `saveBackupFile()` — writes every record to one backup file and downloads it
 - `saveDoc()` — writes the open document back to the record
 - `saveNotes()` — writes the notes field back to the record
 - `setBucket()` — switches the visible bucket tab

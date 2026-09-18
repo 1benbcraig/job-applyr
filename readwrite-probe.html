@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Job Applyr — read-and-write probe</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 860px; margin: 32px auto; padding: 0 20px; color: #1a1a1a; line-height: 1.5; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; text-transform: uppercase; letter-spacing: .06em; color: #555; }
+  .box { border: 1px solid #ccc; padding: 14px 16px; margin: 12px 0; background: #fafafa; }
+  .answer { border-left: 4px solid #ccc; padding: 8px 12px; margin: 8px 0; background: #fff; }
+  .yes { border-left-color: #2e7d32; }
+  .no  { border-left-color: #8a3737; }
+  .unknown { border-left-color: #b8860b; }
+  button { font: inherit; padding: 9px 14px; border: 1px solid #333; background: #fff; cursor: pointer; margin: 4px 6px 4px 0; }
+  button:disabled { color: #999; border-color: #ccc; cursor: default; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #e8e8e8; padding: 14px; font-size: 13px; line-height: 1.45; }
+  code { background: #eee; padding: 1px 4px; }
+  .warn { background: #fff4d6; border: 1px solid #b8860b; padding: 12px 14px; }
+  ol { padding-left: 22px; }
+</style>
+</head>
+<body>
+
+<h1>Job Applyr — read-and-write probe</h1>
+<p>Throwaway page. It answers three questions the backup build cannot be written without. Nothing here touches your job records.</p>
+
+<div class="box">
+  <div><strong>This page's address:</strong> <span id="addr">—</span></div>
+  <div><strong>Secure context:</strong> <span id="secure">—</span></div>
+  <div><strong>Folder picker available:</strong> <span id="picker">—</span></div>
+</div>
+
+<div id="localwarn" class="warn" style="display:none">
+  <strong>This page is not being served from the web.</strong> Opened as a file, Chrome treats it as a brand-new anonymous site every time, so nothing it says about permissions means anything. Upload it to the repo and open it at
+  <code>https://1benbcraig.github.io/job-applyr/readwrite-probe.html</code> instead.
+</div>
+
+<h2>Answers so far</h2>
+<div id="answers">
+  <div class="answer unknown" id="a1"><strong>Q1. Read-and-write permission on this site, surviving a full quit of Chrome:</strong> not measured yet.</div>
+  <div class="answer unknown" id="a2"><strong>Q2. Upgrading the folder the app already has, without picking it again:</strong> not measured yet.</div>
+  <div class="answer unknown" id="a3"><strong>Q3. A write that is still on disk after Chrome is quit and reopened:</strong> not measured yet.</div>
+</div>
+
+<h2>What to do</h2>
+<ol>
+  <li>Press <strong>Step 1</strong> and pick your profile folder (<code>job-applyr-profile</code>). If Chrome offers an "edit files" or "save changes" wording, allow it.</li>
+  <li>Press <strong>Step 2</strong>.</li>
+  <li>Press <strong>Step 3</strong>. It creates a folder called <code>ja-lite-backups</code> inside your profile folder and writes one small text file into it.</li>
+  <li><strong>Quit Chrome completely</strong> — Command-Q, not just closing the window. Open Chrome again and come back to this page.</li>
+  <li>Read the "Answers so far" block, which fills itself in on load, then press <strong>Step 4</strong>.</li>
+  <li>Press <strong>Copy the whole log</strong> and paste it back to Claude.</li>
+</ol>
+
+<div class="box">
+  <button id="b1">Step 1 — pick the folder in read-and-write mode</button>
+  <button id="b2">Step 2 — try upgrading the app's folder</button>
+  <button id="b3">Step 3 — write a test file</button>
+  <button id="b4">Step 4 — read the test file back</button>
+  <button id="bcopy">Copy the whole log</button>
+</div>
+
+<h2>Log</h2>
+<pre id="log"></pre>
+
+<script>
+// ---------------------------------------------------------------------------
+// This probe keeps its own IndexedDB. It reads the app's handle in Step 2 but
+// never writes to the app's database, so running this cannot disturb the app.
+// ---------------------------------------------------------------------------
+const PROBE_DB = 'ja-lite-probe', PROBE_STORE = 'handles', PROBE_KEY = 'folder';
+const APP_DB   = 'ja-lite',       APP_STORE   = 'handles', APP_KEY   = 'profileFolder';
+const BACKUP_DIR = 'ja-lite-backups';
+const TEST_FILE  = 'probe-write-test.txt';
+const TEMP_FILE  = 'probe-write-test.txt.tmp';
+const STAMP_KEY  = 'probe:lastWrite';
+
+const logEl = document.getElementById('log');
+const lines = [];
+function log(s) { lines.push(s); logEl.textContent = lines.join('\n'); }
+function rule(s) { log(''); log('--- ' + s + ' ' + '-'.repeat(Math.max(0, 58 - s.length))); }
+function answer(id, state, text) {
+  const el = document.getElementById(id);
+  el.className = 'answer ' + state;
+  el.innerHTML = '<strong>' + el.querySelector('strong').textContent + '</strong> ' + text;
+}
+function why(e) { return (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : String(e)); }
+
+function idb(dbName, storeName) {
+  return {
+    open() {
+      return new Promise((res, rej) => {
+        let req;
+        try { req = indexedDB.open(dbName, 1); } catch (e) { rej(e); return; }
+        req.onupgradeneeded = () => {
+          if (!req.result.objectStoreNames.contains(storeName)) req.result.createObjectStore(storeName);
+        };
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error || new Error('IndexedDB unavailable'));
+      });
+    },
+    async get(key) {
+      const db = await this.open();
+      if (!db.objectStoreNames.contains(storeName)) return undefined;
+      return new Promise((res, rej) => {
+        const rq = db.transaction(storeName).objectStore(storeName).get(key);
+        rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+      });
+    },
+    async set(key, value) {
+      const db = await this.open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(value, key);
+        tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+      });
+    }
+  };
+}
+const probeDb = idb(PROBE_DB, PROBE_STORE);
+const appDb   = idb(APP_DB, APP_STORE);
+
+async function perms(handle, label) {
+  const out = {};
+  for (const mode of ['read', 'readwrite']) {
+    try { out[mode] = await handle.queryPermission({ mode }); }
+    catch (e) { out[mode] = 'threw (' + why(e) + ')'; }
+  }
+  log(label + ': read=' + out.read + '  readwrite=' + out.readwrite);
+  return out;
+}
+
+// --------------------------- on load ---------------------------------------
+(async function onLoad() {
+  document.getElementById('addr').textContent = location.href;
+  document.getElementById('secure').textContent = window.isSecureContext ? 'yes' : 'NO';
+  document.getElementById('picker').textContent = (typeof window.showDirectoryPicker === 'function') ? 'yes' : 'NO';
+  if (location.protocol === 'file:') document.getElementById('localwarn').style.display = 'block';
+
+  log('Probe loaded ' + new Date().toString());
+  log('Address: ' + location.href);
+  log('Origin: ' + location.origin + '   secure context: ' + window.isSecureContext);
+  log('showDirectoryPicker: ' + (typeof window.showDirectoryPicker));
+
+  rule('what this page already had, checked with NO click');
+  let probeHandle = null;
+  try { probeHandle = await probeDb.get(PROBE_KEY); }
+  catch (e) { log('Could not read this probe’s own remembered folder: ' + why(e)); }
+
+  if (!probeHandle) {
+    log('No folder remembered by this probe yet. Start at Step 1.');
+  } else {
+    log('Folder remembered by this probe: ' + probeHandle.name);
+    const p = await perms(probeHandle, 'Permission held on load, without asking');
+    const stamp = localStorage.getItem(STAMP_KEY) || '(none)';
+    log('Last write this probe recorded: ' + stamp);
+
+    if (p.readwrite === 'granted') {
+      answer('a1', 'yes', 'read-and-write permission was <strong>still granted on a cold load</strong>, with no prompt. (Only conclusive if Chrome was fully quit since Step 1.)');
+    } else {
+      answer('a1', 'no', 'read-and-write permission came back <strong>' + p.readwrite + '</strong> on load, so it did not survive. (Only conclusive if Chrome was fully quit since Step 1.)');
+    }
+
+    // Q3 answers itself on load when permission held: read the file back.
+    try {
+      const dir = await probeHandle.getDirectoryHandle(BACKUP_DIR);
+      const fh = await dir.getFileHandle(TEST_FILE);
+      const text = await (await fh.getFile()).text();
+      log('Read back ' + BACKUP_DIR + '/' + TEST_FILE + ' with no click:');
+      log('  ' + text.replace(/\n/g, '\n  '));
+      answer('a3', 'yes', 'the file written in Step 3 was <strong>read back from disk on a cold load</strong>. Its contents are in the log.');
+    } catch (e) {
+      log('Could not read the test file on load: ' + why(e));
+      answer('a3', 'unknown', 'the test file could not be read on load — ' + why(e) + '. Run Step 3 if you have not yet.');
+    }
+  }
+
+  rule('what the APP already had, checked with NO click');
+  try {
+    const appHandle = await appDb.get(APP_KEY);
+    if (!appHandle) log('The app has no folder remembered in this browser. (Expected if site data was cleared and the app has not been re-pointed.)');
+    else { log('Folder the app remembers: ' + appHandle.name); await perms(appHandle, 'App folder permission on load, without asking'); }
+  } catch (e) { log('Could not read the app’s remembered folder: ' + why(e)); }
+})();
+
+// --------------------------- step 1 ----------------------------------------
+document.getElementById('b1').onclick = async () => {
+  rule('Step 1 — pick the folder in read-and-write mode');
+  try {
+    const handle = await window.showDirectoryPicker({ id: 'ja-lite-probe', mode: 'readwrite' });
+    log('Picker returned: ' + handle.name);
+    await probeDb.set(PROBE_KEY, handle);
+    log('Handle stored in this probe’s own IndexedDB.');
+    const p = await perms(handle, 'Permission immediately after picking');
+    if (p.readwrite === 'granted') {
+      log('RESULT: the picker CAN be opened in read-and-write mode on this site, and permission is granted.');
+      answer('a1', 'unknown', 'read-and-write was granted at the moment of picking. <strong>Now quit Chrome fully and come back</strong> — that is the half that is actually in question.');
+    } else {
+      log('RESULT: the picker opened but read-and-write is ' + p.readwrite + '.');
+      answer('a1', 'no', 'read-and-write was <strong>' + p.readwrite + '</strong> straight after picking.');
+    }
+  } catch (e) {
+    log('FAILED: ' + why(e));
+    if (e && e.name === 'AbortError') log('(That is just the picker being closed. Press Step 1 again.)');
+    else answer('a1', 'no', 'the read-and-write picker failed: ' + why(e));
+  }
+};
+
+// --------------------------- step 2 ----------------------------------------
+document.getElementById('b2').onclick = async () => {
+  rule('Step 2 — upgrade the folder the app already has');
+  let appHandle = null;
+  try { appHandle = await appDb.get(APP_KEY); }
+  catch (e) { log('Could not read the app’s folder handle: ' + why(e)); }
+  if (!appHandle) {
+    log('The app has no remembered folder in this browser, so there is nothing to upgrade.');
+    log('This question can only be answered on a browser where the app has already been pointed at the folder in READ mode.');
+    answer('a2', 'unknown', 'not answerable here — the app has no folder remembered in this browser.');
+    return;
+  }
+  log('App folder: ' + appHandle.name);
+  const before = await perms(appHandle, 'Before asking');
+  let after = 'not asked';
+  try { after = await appHandle.requestPermission({ mode: 'readwrite' }); }
+  catch (e) { after = 'threw (' + why(e) + ')'; }
+  log('requestPermission({mode:"readwrite"}) returned: ' + after);
+  await perms(appHandle, 'After asking');
+  if (after === 'granted') {
+    log('RESULT: the existing read handle CAN be upgraded to read-and-write without picking the folder again.');
+    answer('a2', 'yes', 'the app’s existing folder <strong>was upgraded to read-and-write</strong> without a fresh pick (a permission prompt is still shown once).');
+  } else {
+    log('RESULT: the upgrade did not happen (' + after + '). A fresh pick would be needed.');
+    answer('a2', 'no', 'the upgrade returned <strong>' + after + '</strong> — the user would have to pick the folder again.');
+  }
+  log('Note: the app’s own database was NOT modified by this step.');
+};
+
+// --------------------------- step 3 ----------------------------------------
+document.getElementById('b3').onclick = async () => {
+  rule('Step 3 — write a test file');
+  let handle = null;
+  try { handle = await probeDb.get(PROBE_KEY); } catch (e) {}
+  if (!handle) { log('No folder remembered by this probe. Do Step 1 first.'); return; }
+
+  try {
+    let perm = await handle.queryPermission({ mode: 'readwrite' });
+    log('readwrite permission before writing: ' + perm);
+    if (perm !== 'granted') {
+      perm = await handle.requestPermission({ mode: 'readwrite' });
+      log('after asking: ' + perm);
+    }
+    if (perm !== 'granted') { log('FAILED: no read-and-write permission, so nothing was written.'); return; }
+
+    const dir = await handle.getDirectoryHandle(BACKUP_DIR, { create: true });
+    log('Subfolder ready: ' + BACKUP_DIR + '/  (created if it did not exist)');
+
+    const token = 'token-' + Math.random().toString(36).slice(2, 10);
+    const body = 'Written by the Job Applyr read-and-write probe.\nWhen: ' + new Date().toString() + '\nToken: ' + token + '\nThis file is safe to delete.';
+
+    // The same temp-then-replace shape the real backup would use, so this also
+    // tests that a temporary file can be written and then removed.
+    const tmp = await dir.getFileHandle(TEMP_FILE, { create: true });
+    let w = await tmp.createWritable();
+    await w.write(body); await w.close();
+    log('Wrote ' + BACKUP_DIR + '/' + TEMP_FILE);
+
+    const fh = await dir.getFileHandle(TEST_FILE, { create: true });
+    w = await fh.createWritable();
+    await w.write(body); await w.close();
+    log('Wrote ' + BACKUP_DIR + '/' + TEST_FILE);
+
+    try { await dir.removeEntry(TEMP_FILE); log('Removed the temporary file (removeEntry works).'); }
+    catch (e) { log('removeEntry FAILED: ' + why(e) + '  — a leftover .tmp file will be in that folder.'); }
+
+    const readBack = await (await fh.getFile()).text();
+    log('Read it straight back, same page load: ' + (readBack === body ? 'MATCHES what was written.' : 'DOES NOT MATCH.'));
+    localStorage.setItem(STAMP_KEY, new Date().toString() + ' / ' + token);
+    log('RESULT: the write landed. Now quit Chrome fully (Command-Q), reopen, come back here and press Step 4.');
+  } catch (e) {
+    log('FAILED: ' + why(e));
+    answer('a3', 'no', 'the write failed: ' + why(e));
+  }
+};
+
+// --------------------------- step 4 ----------------------------------------
+document.getElementById('b4').onclick = async () => {
+  rule('Step 4 — read the test file back after a restart');
+  let handle = null;
+  try { handle = await probeDb.get(PROBE_KEY); } catch (e) {}
+  if (!handle) {
+    if (!localStorage.getItem(STAMP_KEY)) {
+      log('No folder remembered, and no record of a write. Steps 1 and 3 have not been run in this browser yet — start there.');
+    } else {
+      log('A write was recorded here, but the remembered folder is GONE. The handle itself did not survive — that is a result, note it.');
+      answer('a3', 'no', 'the remembered folder itself was gone after the restart, so the file could not even be looked for.');
+    }
+    return;
+  }
+  try {
+    const before = await handle.queryPermission({ mode: 'readwrite' });
+    log('readwrite permission, asked but not requested: ' + before);
+    const dir = await handle.getDirectoryHandle(BACKUP_DIR);
+    const fh = await dir.getFileHandle(TEST_FILE);
+    const text = await (await fh.getFile()).text();
+    log('File found. Contents:');
+    log('  ' + text.replace(/\n/g, '\n  '));
+    log('Token this browser recorded at write time: ' + (localStorage.getItem(STAMP_KEY) || '(none)'));
+    log('RESULT: the file written before the restart is on disk and readable' + (before === 'granted' ? ' with no prompt.' : ', but only after permission was ' + before + '.'));
+    answer('a3', 'yes', 'the file survived the restart and was read back' + (before === 'granted' ? ' with no prompt' : ' (permission state was ' + before + ')') + '.');
+  } catch (e) {
+    log('FAILED: ' + why(e));
+    answer('a3', 'no', 'the file could not be read after the restart: ' + why(e));
+  }
+};
+
+document.getElementById('bcopy').onclick = async () => {
+  const text = 'Address: ' + location.href + '\n' + lines.join('\n');
+  try { await navigator.clipboard.writeText(text); log(''); log('(Log copied to the clipboard.)'); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); log(''); log('(Log copied to the clipboard.)'); }
+    catch (e2) { log('(Could not copy automatically — select the log text and copy it by hand.)'); }
+    document.body.removeChild(ta);
+  }
+};
+</script>
+</body>
+</html>
