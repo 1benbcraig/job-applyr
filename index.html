@@ -704,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '26';
+const APP_VERSION = '27';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -923,12 +923,12 @@ const store = {
   async saveJob(job) {
     const key = job.storageKey || storageKeyFor(job);
     job.storageKey = key;
-    try { await this._set(key, JSON.stringify(job)); return true; }
+    try { await this._set(key, JSON.stringify(job)); autoBackup.schedule(); return true; }
     catch (e) { console.error('Failed to save job:', key, e); return false; }
   },
 
   async deleteJob(key) {
-    try { await this._delete(key); return true; }
+    try { await this._delete(key); autoBackup.schedule(); return true; }
     catch (e) { console.error('Failed to delete job:', key, e); return false; }
   },
 
@@ -938,12 +938,12 @@ const store = {
   },
 
   async savePending(item) {
-    try { await this._set(item.storageKey, JSON.stringify(item)); return true; }
+    try { await this._set(item.storageKey, JSON.stringify(item)); autoBackup.schedule(); return true; }
     catch (e) { console.error('Failed to save pending posting:', e); return false; }
   },
 
   async deletePending(key) {
-    try { await this._delete(key); return true; }
+    try { await this._delete(key); autoBackup.schedule(); return true; }
     catch (e) { console.error('Failed to delete pending posting:', key, e); return false; }
   },
 
@@ -1087,6 +1087,161 @@ const backup = {
     if (repaired.length) await Promise.all(repaired.map(j => store.saveJob(j)));
 
     return { jobsAdded, jobsReplaced, pendingAdded, pendingReplaced, total: jobs.length };
+  }
+};
+
+// ---- automatic backup: a copy in the profile folder, rewritten on every change ----
+// Part B of D-30. Part A's file only protects someone who remembers to press a
+// button. This writes the same file, in the same format, into a subfolder of
+// the profile folder every time a record changes, so a browser wipe costs
+// nothing but a re-pick of the folder.
+//
+// Writing needs read-and-write permission on the folder, which the app has
+// never asked for before. It is asked for from a real click and both answers
+// are handled: granted, it writes; refused, the line says so and the user is
+// back on the manual file. Probed on the live site 2026-09-18: the permission
+// survives a full quit of Chrome and the write really lands on disk.
+const AUTO_BACKUP_DIR = 'ja-lite-backups';
+const AUTO_BACKUP_FILE = 'job-applyr-backup.json';
+const AUTO_BACKUP_PREVIOUS_FILE = 'job-applyr-backup-previous.json';
+const AUTO_BACKUP_TEMP_FILE = 'job-applyr-backup.json.tmp';
+// A burst of edits within this pause becomes one write.
+const AUTO_BACKUP_PAUSE_MS = 2000;
+
+async function readFolderFile(dir, name) {
+  const fh = await dir.getFileHandle(name);
+  return (await fh.getFile()).text();
+}
+async function writeFolderFile(dir, name, text) {
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  try { await w.write(text); await w.close(); }
+  catch (e) { try { await w.abort(); } catch (_) {} throw e; }
+}
+
+const autoBackup = {
+  // 'off'    — never turned on in this browser
+  // 'on'     — turned on, and Chrome allows writing this launch
+  // 'paused' — turned on, but Chrome has not allowed writing since the page opened
+  // 'failed' — turned on, and the last write threw
+  status: 'off',
+  lastError: '',
+  onChange: null,
+  _timer: null, _running: false, _again: false,
+
+  async folder() {
+    try { return (await idbGet(PROFILE_HANDLE_KEY)) || null; } catch (e) { return null; }
+  },
+
+  // On boot there is no click, so this can only look, never ask.
+  async check() {
+    const meta = await backup.readMeta();
+    if (!meta.auto) { this.status = 'off'; return this.status; }
+    const h = await this.folder();
+    let perm = 'prompt';
+    if (h) { try { perm = await h.queryPermission({ mode: 'readwrite' }); } catch (e) { perm = 'prompt'; } }
+    this.status = perm === 'granted' ? 'on' : 'paused';
+    return this.status;
+  },
+
+  // Must be called straight from a click: Chrome only shows its permission
+  // prompt with a user gesture behind it. Nothing slow may run before this.
+  async requestWrite() {
+    const h = await this.folder();
+    if (!h) return { granted: false, noFolder: true };
+    let perm = 'denied';
+    try { perm = await h.requestPermission({ mode: 'readwrite' }); } catch (e) { perm = 'denied'; }
+    return { granted: perm === 'granted', folderName: h.name };
+  },
+
+  async enable() {
+    const meta = await backup.readMeta();
+    await backup.writeMeta(Object.assign({}, meta, { auto: true }));
+    this.status = 'on';
+    this.lastError = '';
+    await this.writeNow();
+  },
+
+  schedule() {
+    if (this.status !== 'on' && this.status !== 'failed') return;
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => { this.writeNow(); }, AUTO_BACKUP_PAUSE_MS);
+  },
+
+  // One write at a time. A change that lands mid-write queues one more pass.
+  async writeNow() {
+    clearTimeout(this._timer);
+    if (this._running) { this._again = true; return; }
+    this._running = true;
+    try {
+      do { this._again = false; await this._write(); } while (this._again);
+    } finally { this._running = false; }
+  },
+
+  async _write() {
+    const h = await this.folder();
+    let perm = 'prompt';
+    if (h) { try { perm = await h.queryPermission({ mode: 'readwrite' }); } catch (e) { perm = 'prompt'; } }
+    if (perm !== 'granted') { this.status = 'paused'; if (this.onChange) this.onChange(); return; }
+
+    const data = await backup.collect();
+    // Never replace a copy with nothing. An empty browser is exactly what a
+    // wipe leaves behind, and writing that out would push the good copy to
+    // "previous" and the next write would destroy it.
+    if (!data.jobs.length && !data.pending.length) return;
+    const text = JSON.stringify(data, null, 2);
+
+    try {
+      const dir = await h.getDirectoryHandle(AUTO_BACKUP_DIR, { create: true });
+      // 1. The whole new copy goes to a temporary name first, and is read back.
+      await writeFolderFile(dir, AUTO_BACKUP_TEMP_FILE, text);
+      if ((await readFolderFile(dir, AUTO_BACKUP_TEMP_FILE)) !== text) {
+        throw new Error('the new copy did not read back the same as what was written');
+      }
+      // 2. The current copy becomes the previous one — only if it is a good
+      //    backup, so a damaged file never overwrites a good previous copy.
+      let current = null;
+      try { current = await readFolderFile(dir, AUTO_BACKUP_FILE); } catch (e) { current = null; }
+      if (current !== null) {
+        let good = true;
+        try { backup.parse(current); } catch (e) { good = false; }
+        if (good) await writeFolderFile(dir, AUTO_BACKUP_PREVIOUS_FILE, current);
+      }
+      // 3. The new copy goes into place, and the temporary one is removed.
+      await writeFolderFile(dir, AUTO_BACKUP_FILE, text);
+      try { await dir.removeEntry(AUTO_BACKUP_TEMP_FILE); } catch (e) {}
+
+      const meta = await backup.readMeta();
+      await backup.writeMeta(Object.assign({}, meta, {
+        auto: true, lastAutoAt: data.exportedAt, lastAutoCount: data.counts.jobs, lastAutoFolder: h.name
+      }));
+      this.status = 'on';
+      this.lastError = '';
+    } catch (e) {
+      console.error('Automatic backup failed:', e);
+      this.status = 'failed';
+      this.lastError = (e && e.message) ? e.message : String(e);
+    }
+    if (this.onChange) this.onChange();
+  },
+
+  // Read-only: needs only the permission the app already has. Tries the
+  // newest copy first, then the one before it.
+  async findInFolder() {
+    const h = await this.folder();
+    if (!h) return null;
+    let perm = 'prompt';
+    try { perm = await h.queryPermission({ mode: 'read' }); } catch (e) { perm = 'prompt'; }
+    if (perm !== 'granted') return null;
+    let dir;
+    try { dir = await h.getDirectoryHandle(AUTO_BACKUP_DIR); } catch (e) { return null; }
+    for (const name of [AUTO_BACKUP_FILE, AUTO_BACKUP_PREVIOUS_FILE]) {
+      try {
+        const parsed = backup.parse(await readFolderFile(dir, name));
+        if (parsed.jobs.length) return { parsed, name, folderName: h.name, count: parsed.jobs.length, exportedAt: parsed.exportedAt };
+      } catch (e) { /* missing or unreadable — try the older copy */ }
+    }
+    return null;
   }
 };
 
@@ -1492,7 +1647,7 @@ class App {
       uploadText: '', uploadUrl: '', dragOver: false, toast: '',
       pending: [], analyzing: false, analyzeDone: 0, analyzeTotal: 0, analyzeErrors: [], gradeError: '',
       jobs: [], loading: true, storageError: '',
-      backupMeta: {}, backupMessage: '', backupError: ''
+      backupMeta: {}, backupMessage: '', backupError: '', folderBackup: null
     };
     this.render();
     this.boot();
@@ -1510,6 +1665,12 @@ class App {
       try { await loadProfile(false); }
       catch (e) { console.error('Profile load failed:', e); profileSource.error = String(e && e.message || e); }
       console.log('Profile: ' + profileSource.from + (profileSource.folderName ? ' (' + profileSource.folderName + ')' : ''));
+
+      // Automatic backup: can only be checked here, never asked for — no click.
+      autoBackup.onChange = () => this.refreshBackupLine();
+      await autoBackup.check();
+      // An empty browser with a copy in the folder is what a wipe looks like.
+      const folderBackup = (!jobs.length && !pending.length) ? await autoBackup.findInFolder() : null;
 
       const dirty = new Map();
       const repaired = repairJobIds(jobs);
@@ -1534,7 +1695,7 @@ class App {
       if (dirty.size) await Promise.all([...dirty.values()].map(j => store.saveJob(j)));
       if (needsRecompute) await store.saveMigrations(Object.assign({}, migrations, { duplicateCheckV2: true }));
       this.setState(Object.assign({
-        jobs, pending, backupMeta, loading: false,
+        jobs, pending, backupMeta, folderBackup, loading: false,
         activeBucket: ui.activeBucket || 'ready',
         sortField: ui.sortField || 'posted',
         sortDir: ui.sortDir || 'desc'
@@ -2145,40 +2306,163 @@ class App {
       if (e && e.name === 'AbortError') return;   // the user closed the picker
       profileSource.error = e && e.message ? e.message : String(e);
     }
-    this.render();
+    await this.lookForFolderBackup();
   }
 
   async reloadProfile() {
     try { await loadProfile(true); }
     catch (e) { profileSource.error = e && e.message ? e.message : String(e); }
-    this.render();
+    await this.lookForFolderBackup();
+  }
+
+  // A different folder may have been picked, so the automatic-backup status is
+  // re-checked too. The restore offer only appears when this browser is empty.
+  async lookForFolderBackup() {
+    await autoBackup.check();
+    const empty = !(this.state.jobs || []).length && !(this.state.pending || []).length;
+    const folderBackup = empty ? await autoBackup.findInFolder() : null;
+    this.setState({ folderBackup, backupMeta: await backup.readMeta() });
   }
 
   // ---- backup controls, on the Upload tab beside the profile line ----
   // The line is here so the screen always answers one question: if this browser
-  // were wiped right now, what would come back? Until the folder write exists,
-  // the honest answer is "only what you have saved by hand", and it says so.
+  // were wiped right now, what would come back? With automatic backup on, the
+  // answer is "everything, from the profile folder". Otherwise it is "only what
+  // you have saved by hand", and it says so.
   backupLineHTML() {
     const meta = this.state.backupMeta || {};
-    const when = meta.lastFileAt ? new Date(meta.lastFileAt) : null;
-    const n = Number(meta.lastFileCount || 0);
-    const never = !when || isNaN(when.getTime());
-    const message = never
-      ? 'Backup: off. Nothing is written outside this browser, so clearing Chrome’s browsing data would delete every job. No backup file has been saved yet.'
-      : 'Backup: manual only — a copy is written when you press Save a backup, not automatically. Last copy: '
-        + when.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-        + ', ' + when.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-        + ' (' + n + ' job' + (n === 1 ? '' : 's') + ').';
+    const stamp = (iso, n) => {
+      const d = iso ? new Date(iso) : null;
+      if (!d || isNaN(d.getTime())) return '';
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+        + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        + ' (' + n + ' job' + (n === 1 ? '' : 's') + ')';
+    };
+    const fileStamp = stamp(meta.lastFileAt, Number(meta.lastFileCount || 0));
+    const autoStamp = stamp(meta.lastAutoAt, Number(meta.lastAutoCount || 0));
+    const where = (meta.lastAutoFolder || profileSource.folderName || 'your profile folder') + ' / ' + AUTO_BACKUP_DIR;
+    const st = autoBackup.status;
+    let message, warn;
+    if (st === 'on') {
+      warn = false;
+      message = 'Backup: on. Every change is copied automatically into ' + where + '.'
+        + (autoStamp ? ' Last copy: ' + autoStamp + '.' : '');
+    } else if (st === 'paused') {
+      warn = true;
+      message = 'Backup: paused. Automatic backup is turned on, but Chrome has not allowed this page to write to the profile folder since it opened, so nothing is being copied. Press Turn on automatic backup to allow it again.'
+        + (autoStamp ? ' Last copy: ' + autoStamp + '.' : '');
+    } else if (st === 'failed') {
+      warn = true;
+      message = 'Backup: the last automatic copy failed (' + autoBackup.lastError + '). Your jobs are still in this browser, and the next change will try again.'
+        + (autoStamp ? ' Last good copy: ' + autoStamp + '.' : '');
+    } else if (!fileStamp) {
+      warn = true;
+      message = 'Backup: off. Nothing is written outside this browser, so clearing Chrome’s browsing data would delete every job. No backup file has been saved yet.';
+    } else {
+      warn = false;
+      message = 'Backup: manual only — a copy is written when you press Save a backup, not automatically. Last copy: ' + fileStamp + '.';
+    }
     return `
-      <p class="text-muted" style="font-size:13px;margin:0 0 var(--space-2);display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap">
-        <span style="${never ? 'color:var(--color-rejected-700)' : ''}">${escapeHtml(message)}</span>
+      <p id="backup-line" class="text-muted" style="font-size:13px;margin:0 0 var(--space-2);display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap">
+        <span style="${warn ? 'color:var(--color-rejected-700)' : ''}">${escapeHtml(message)}</span>
+        ${st !== 'on' ? `<button type="button" class="btn btn-secondary" style="font-size:13px" onclick="app.turnOnAutoBackup();return false;">Turn on automatic backup</button>` : ''}
         <button type="button" class="btn btn-secondary" style="font-size:13px" onclick="app.saveBackupFile();return false;">Save a backup</button>
         <button type="button" class="btn btn-ghost" style="font-size:13px" onclick="app.chooseBackupFile();return false;">Restore from a backup</button>
       </p>
       <input id="backup-file" type="file" accept=".json,application/json" style="display:none" onchange="app.restoreBackupFile(this);">
+      ${this.folderBackupHTML()}
       ${this.state.backupMessage ? `<p style="font-size:13px;color:var(--color-neutral-700);margin:0 0 var(--space-2)">${escapeHtml(this.state.backupMessage)}</p>` : ''}
       ${this.state.backupError ? `<p style="font-size:13px;color:var(--color-rejected-700);margin:0 0 var(--space-2)">${escapeHtml(this.state.backupError)}</p>` : ''}
     `;
+  }
+
+  // Background writes finish while the user may be typing or editing a
+  // document, so they redraw only the backup line, never the whole screen.
+  async refreshBackupLine() {
+    this.state.backupMeta = await backup.readMeta();
+    const el = document.getElementById('backup-line');
+    if (!el) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = this.backupLineHTML();
+    const fresh = tmp.querySelector('#backup-line');
+    if (fresh) el.replaceWith(fresh);
+  }
+
+  // The restore offer: shown only when this browser holds no jobs and the
+  // profile folder holds an automatic copy. One button.
+  folderBackupHTML() {
+    const fb = this.state.folderBackup;
+    if (!fb || (this.state.jobs || []).length) return '';
+    const d = fb.exportedAt ? new Date(fb.exportedAt) : null;
+    const when = d && !isNaN(d.getTime())
+      ? ', copied ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      : '';
+    return `
+      <div style="border:1px solid var(--color-neutral-300);padding:var(--space-4);margin:var(--space-2) 0 var(--space-4)">
+        <p style="font-size:14px;font-weight:600;margin:0 0 var(--space-1)">Your jobs can be brought back</p>
+        <p class="text-muted" style="font-size:14px;margin:0 0 var(--space-2)">This browser has no jobs in it, but your profile folder has an automatic backup: ${fb.count} job${fb.count === 1 ? '' : 's'}${escapeHtml(when)}.${fb.name === AUTO_BACKUP_PREVIOUS_FILE ? ' The newest copy could not be read, so this is the one before it.' : ''} Restoring also turns automatic backup back on.</p>
+        <button type="button" class="btn btn-primary" onclick="app.restoreFromFolderBackup();return false;">Restore ${fb.count} job${fb.count === 1 ? '' : 's'}</button>
+      </div>
+    `;
+  }
+
+  async turnOnAutoBackup() {
+    // First thing, before anything slow: Chrome needs the click behind it.
+    const r = await autoBackup.requestWrite();
+    if (r.noFolder) {
+      this.setState({ backupMessage: '', backupError: 'Choose your profile folder first. The automatic copy is written into it.' });
+      return;
+    }
+    if (!r.granted) {
+      await autoBackup.check();
+      this.setState({ backupMeta: await backup.readMeta(), backupMessage: '',
+        backupError: 'Chrome did not give permission to write to the profile folder, so nothing is being copied automatically. Your jobs are protected only by Save a backup.' });
+      return;
+    }
+    await autoBackup.enable();
+    const meta = await backup.readMeta();
+    if (autoBackup.status === 'on') {
+      this.setState({ backupMeta: meta, backupError: '',
+        backupMessage: 'Automatic backup is on. ' + (meta.lastAutoAt
+          ? 'A copy was written to ' + r.folderName + ' / ' + AUTO_BACKUP_DIR + ' / ' + AUTO_BACKUP_FILE + '.'
+          : 'There are no jobs yet, so the first copy is written when you add one.') });
+    } else {
+      this.setState({ backupMeta: meta, backupMessage: '',
+        backupError: 'Permission was given, but the first copy could not be written: ' + autoBackup.lastError });
+    }
+  }
+
+  async restoreFromFolderBackup() {
+    const fb = this.state.folderBackup;
+    if (!fb) return;
+    // Asked first, while the click still counts. The restore goes ahead either way.
+    const r = await autoBackup.requestWrite();
+    try {
+      const res = await backup.restore(fb.parsed);
+      const [jobs, pending] = await Promise.all([store.listJobs(), store.listPending()]);
+      let tail;
+      if (r.granted) {
+        await autoBackup.enable();
+        tail = autoBackup.status === 'on'
+          ? ' Automatic backup is on again.'
+          : ' Automatic backup could not write its first copy: ' + autoBackup.lastError;
+      } else {
+        await autoBackup.check();
+        tail = ' Chrome did not give permission to write to the profile folder, so automatic backup is off. Press Turn on automatic backup to try again.';
+      }
+      this.setState({
+        jobs, pending, folderBackup: null, backupMeta: await backup.readMeta(), backupError: '',
+        backupMessage: 'Restored from your profile folder: ' + res.jobsAdded + ' job' + (res.jobsAdded === 1 ? '' : 's')
+          + ' added. ' + res.total + ' job' + (res.total === 1 ? '' : 's') + ' in the tracker now.' + tail
+      });
+    } catch (e) {
+      const jobs = await store.listJobs();
+      this.setState({
+        jobs, backupMessage: '',
+        backupError: 'The restore stopped partway (' + (e && e.message ? e.message : String(e))
+          + '). Nothing was deleted — there are ' + jobs.length + ' jobs in the tracker now. Try the restore again.'
+      });
+    }
   }
 
   async saveBackupFile() {

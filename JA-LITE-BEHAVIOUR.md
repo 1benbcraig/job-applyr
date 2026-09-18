@@ -10,8 +10,8 @@ one, **this one wins** — it is the only one read from the code.
 | | |
 |---|---|
 | Source | `index.html` |
-| `APP_VERSION` | **26** |
-| Size | 2,544 lines, 382,202 bytes |
+| `APP_VERSION` | **27** |
+| Size | 2,828 lines, 396,093 bytes |
 
 **To regenerate:** `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
@@ -149,6 +149,17 @@ One-time migrations recorded under the migrations key: `duplicateCheckV2`.
 **A migration flag is checked once and never re-run.** Records written before a flag was
 set keep whatever answer they were given at the time.
 
+**Also written outside the browser, into the profile folder** — only once the user has
+turned on automatic backup and Chrome has allowed writing:
+
+| Constant | Value |
+|---|---|
+| `AUTO_BACKUP_DIR` | `ja-lite-backups` |
+| `AUTO_BACKUP_FILE` | `job-applyr-backup.json` |
+| `AUTO_BACKUP_PREVIOUS_FILE` | `job-applyr-backup-previous.json` |
+| `AUTO_BACKUP_TEMP_FILE` | `job-applyr-backup.json.tmp` |
+| `AUTO_BACKUP_PAUSE_MS` | `2000` |
+
 The profile folder handle lives in IndexedDB, not local storage — a directory handle
 cannot be serialised into local storage.
 
@@ -171,6 +182,7 @@ Every `app.*` handler reachable from the interface:
 - `regenerateDoc()` — clears one document then redrafts it — confirms first, and hand edits do not survive
 - `reloadProfile()` — re-reads the profile folder now
 - `restoreBackupFile()` — reads a backup file and merges it in — records in the file win, nothing is wiped
+- `restoreFromFolderBackup()` — restores from the automatic copy in the profile folder — offered only when the browser holds no jobs; also asks for write permission and turns automatic backup back on
 - `runAnalysis()` — grades the pending postings
 - `saveApiKey()` — stores the Anthropic key in this browser
 - `saveBackupFile()` — writes every record to one backup file and downloads it
@@ -182,6 +194,7 @@ Every `app.*` handler reachable from the interface:
 - `setState()` — generic interface state change
 - `sortBy()` — sorts the list by a column
 - `startEditing()` — opens the rich-text editor on a document
+- `turnOnAutoBackup()` — asks Chrome for permission to write to the profile folder; granted, it writes a first copy and every later change is copied there; refused, the screen says so
 - `updateJobField()` — writes one field on one record
 
 ---
