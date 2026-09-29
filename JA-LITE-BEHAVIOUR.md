@@ -4,7 +4,7 @@
 This file says *what the app does*; `JA-LITE-DECISIONS.md` says why and `JA-LITE-STATE.md` what is left.
 When they disagree, **this one wins** — it is the only one read from the code.
 
-Source `index.html` · `APP_VERSION` **28** · 2,991 lines, 403,003 bytes · regenerate with
+Source `index.html` · `APP_VERSION` **29** · 3,047 lines, 406,511 bytes · regenerate with
 `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
 ## Buckets
@@ -16,7 +16,9 @@ Grader verdict → bucket: `APPLY` → `ready` · `FLAG` → `flagged` · `REJEC
 
 Not a flat list. Groups, in this order, each under its own heading: **Interview scheduled** (`response_status` `interview`), **No response** (`response_status` `none`), **Rejected by employer** (`response_status` `rejected`).
 Each row's dropdown writes `response_status`: `none` "No response" · `rejected` "Rejected by employer" · `interview` "Interview".
-Interview rows sort by `interview_date`, soonest first: **yes** · inline date picker on Interview rows: **yes** · leaving Interview clears `interview_date`: **yes**.
+Interview rows sort by `interview_date`, soonest first: **yes** · inline date picker on Interview rows: **yes** · inline date field on Rejected by employer rows, writing `employer_rejected_date`: **yes**.
+Changing the outcome never clears either date — it is hidden while the row is in another group and shows again on switching back. See D-32.
+Choosing Interview or Rejected by employer when that date is empty does **not** move the row: it stays in its old group until the date is filled in (a four-digit year, because Chrome reports every typed year digit as a date: **yes**) or the user clicks or tabs away: **yes**. The held position is screen-only, never stored.
 **An applied job never leaves Applied because of its outcome.** The `rejected` *bucket* means the user
 rejected the job; "Rejected by employer" inside Applied means the employer rejected the user. See D-21.
 
@@ -36,6 +38,7 @@ Fit sections list `qualItems` / `envItems`; an item is `{tone, text}` or a plain
 - `flagReason` '' · `qualItems` [] · `envItems` [] · `fullPosting` '' · `resume` ''
 - `coverletter` '' · `openQuestions` '' · `portfolioGuidance` [] · `generating` false · `materialsError` ''
 - `sourceUrl` '' · `appliedDate` '' · `rejectedDate` '' · `response_status` 'none' · `interview_date` ''
+- `employer_rejected_date` ''
 
 Filled in when a record is built, if absent: `addedDate`, `postedDateIso`, `postedDate`, `storageKey`.
 
@@ -67,7 +70,7 @@ Setup lives on Settings. Until every requirement is met, every other tab shows o
 - `backupOff` — turn on automatic backup on the *Settings tab* (a link)
 - `backupFailed` — fix automatic backup on the *Settings tab* (a link)
 
-**While any line shows, these refuse and their controls are greyed out:** `deleteJob()`, `generateMaterials()`, `handleSave()`, `moveJob()`, `openReasonPanel()`, `regenerateDoc()`, `runAnalysis()`, `saveDoc()`, `saveNotes()`, `setInterviewDate()`, `setResponseStatus()`, `startEditing()`, `updateJobField()`.
+**While any line shows, these refuse and their controls are greyed out:** `deleteJob()`, `generateMaterials()`, `handleSave()`, `moveJob()`, `openReasonPanel()`, `regenerateDoc()`, `runAnalysis()`, `saveDoc()`, `saveNotes()`, `setEmployerRejectedDate()`, `setInterviewDate()`, `setResponseDate()`, `setResponseStatus()`, `startEditing()`, `updateJobField()`.
 Viewing stays open — switching buckets, sorting, opening a job, switching its tabs, exporting.
 
 ## Everything the user can trigger
@@ -94,8 +97,9 @@ Every `app.*` handler reachable from the interface:
 - `saveDoc()` — writes the open document back to the record
 - `saveNotes()` — writes the notes field back to the record
 - `setBucket()` — switches the visible bucket tab
+- `setEmployerRejectedDate()` — writes `employer_rejected_date` (the employer's rejection, not `rejectedDate`) from the inline date field on a Rejected by employer row
 - `setInterviewDate()` — writes `interview_date` from the inline picker
-- `setResponseStatus()` — writes `response_status`, which is what regroups an applied row
+- `setResponseStatus()` — writes `response_status`; the row regroups at once for No response, or for an outcome whose date is already there — otherwise it waits (see the Applied tab section)
 - `setState()` — generic interface state change
 - `showSettings()` — opens the Settings tab and clears its old messages — also what every "Settings tab" link in the requirements box does
 - `sortBy()` — sorts the list by a column

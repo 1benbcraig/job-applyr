@@ -704,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '28';
+const APP_VERSION = '29';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -712,6 +712,9 @@ const APP_VERSION = '28';
 // sitting in Flagged would have disappeared into it.
 const DUPE_MARK = '#8a3737';
 const DUPE_HIGHLIGHT = '#fbf0a3';
+// D-32: the date that belongs to each outcome on an applied row. The employer's
+// rejection date is its own field; rejectedDate means the user rejected the job.
+const RESPONSE_DATE_FIELD = { interview: 'interview_date', rejected: 'employer_rejected_date' };
 
 // Claude reads the company name out of the posting, so the same employer can
 // come back "Ōura" one grading and "Oura" the next. Both are defensible, and
@@ -1569,7 +1572,7 @@ function normalizeJob(raw, existingJobs) {
     notes: '', flagReason: '', qualItems: [], envItems: [], fullPosting: '',
     resume: '', coverletter: '', openQuestions: '', portfolioGuidance: [],
     generating: false, materialsError: '',
-    sourceUrl: '', appliedDate: '', rejectedDate: '', response_status: 'none', interview_date: ''
+    sourceUrl: '', appliedDate: '', rejectedDate: '', response_status: 'none', interview_date: '', employer_rejected_date: ''
   }, raw || {});
 
   job.addedDate = job.addedDate || today;
@@ -1684,6 +1687,13 @@ class App {
       backupMeta: {}, backupMessage: '', backupError: '', folderBackup: null,
       keyMessage: '', keyError: ''
     };
+    // D-32: a row whose outcome was just set to Interview or Rejected by
+    // employer, with no date yet, is held in its old group until its date is
+    // filled in or the user clicks away. Screen-only; never stored.
+    this.heldRow = null;          // { id, group } — the group the row is shown in
+    this.dateEditPending = false; // a date was edited in place; redraw on click-away
+    document.addEventListener('click', (e) => this.onClickForHeldRow(e), true);
+    document.addEventListener('keyup', (e) => { if (e.key === 'Tab') this.onClickForHeldRow(e); }, true);
     this.render();
     this.boot();
   }
@@ -1856,16 +1866,56 @@ class App {
     // status.md path allowed.
     this.persistJob(id);
   }
+  // D-32. Switching the outcome never clears a date: each outcome's date is
+  // hidden while the row is in another group and shows again on switching back.
+  // Choosing Interview or Rejected by employer with no date yet leaves the row
+  // where it is until its date is filled in or the user clicks away.
   setResponseStatus(id, value) {
     if (this.refuseIfBlocked()) return;
-    if (value !== 'interview') this.updateJobField(id, 'interview_date', '');
+    const job = this.state.jobs.find(j => j.id === id);
+    if (!job) return;
+    const shownGroup = (this.heldRow && this.heldRow.id === id) ? this.heldRow.group : (job.response_status || 'none');
+    const dateField = RESPONSE_DATE_FIELD[value];
     this.updateJobField(id, 'response_status', value);
+    this.heldRow = (dateField && !job[dateField] && shownGroup !== value) ? { id, group: shownGroup } : null;
     this.render();
   }
   setInterviewDate(id, value) {
     if (this.refuseIfBlocked()) return;
-    this.updateJobField(id, 'interview_date', value);
-    this.render();
+    this.setResponseDate(id, 'interview_date', value);
+  }
+  setEmployerRejectedDate(id, value) {
+    if (this.refuseIfBlocked()) return;
+    this.setResponseDate(id, 'employer_rejected_date', value);
+  }
+
+  // Chrome fires a change for every digit typed into the year — 0002, 0020,
+  // 0202, 2026 — each a valid date. Checked in Chrome 2026-09-29. So a date only
+  // counts as filled in once its year has four digits; before that the value
+  // is saved but the row does not move and the screen is not redrawn, which
+  // would take the cursor out of the field mid-typing.
+  setResponseDate(id, field, value) {
+    if (this.refuseIfBlocked()) return;
+    this.updateJobField(id, field, value);
+    const filled = /^[1-9]\d{3}-\d{2}-\d{2}$/.test(value || '');
+    if (this.heldRow && this.heldRow.id === id && filled) {
+      this.heldRow = null;
+      this.dateEditPending = false;
+      this.render();
+    } else {
+      this.dateEditPending = true;
+    }
+  }
+
+  // Click-away for D-32. Runs before the clicked control's own handler, and
+  // redraws only after it, so the click itself always lands.
+  onClickForHeldRow(e) {
+    if (!this.heldRow && !this.dateEditPending) return;
+    const cell = e.target && e.target.closest ? e.target.closest('[data-response-cell]') : null;
+    if (cell && (!this.heldRow || cell.getAttribute('data-response-cell') === this.heldRow.id)) return;
+    this.heldRow = null;
+    this.dateEditPending = false;
+    setTimeout(() => this.render(), 0);
   }
 
   // ---- D-31: blocked until the profile folder, the key and backup are all in place ----
@@ -2324,7 +2374,7 @@ class App {
           <td class="text-muted">${escapeHtml(j.salary)}</td>
           ${showFlags ? `<td class="text-muted" style="text-align:center">${j.flagCount || 0}</td>` : ''}
           <td class="text-muted">${dateShown}</td>
-          <td style="text-align:right;white-space:nowrap" ${isApplied ? 'onclick="event.stopPropagation()"' : ''}>
+          <td style="text-align:right;white-space:nowrap" ${isApplied ? `data-response-cell="${j.id}" onclick="event.stopPropagation()"` : ''}>
             ${(j.duplicateCheck && j.duplicateCheck.isReapply) ? `
               <button type="button" class="btn btn-ghost" style="color:${DUPE_MARK}" ${lock} onclick="event.stopPropagation();app.deleteJob('${j.id}');return false;">Delete</button>
             ` : ''}
@@ -2339,6 +2389,7 @@ class App {
                 <option value="interview" ${rs === 'interview' ? 'selected' : ''}>Interview</option>
               </select>
               ${rs === 'interview' ? `<input type="date" value="${escapeHtml(j.interview_date || '')}" style="font-size:13px;margin-left:6px" ${lock} onchange="app.setInterviewDate('${j.id}', this.value)" onclick="event.stopPropagation()">` : ''}
+              ${rs === 'rejected' ? `<input type="date" value="${escapeHtml(j.employer_rejected_date || '')}" style="font-size:13px;margin-left:6px" ${lock} onchange="app.setEmployerRejectedDate('${j.id}', this.value)" onclick="event.stopPropagation()">` : ''}
             ` : ''}
           </td>
         </tr>
@@ -2352,10 +2403,13 @@ class App {
         { key: 'rejected', label: 'Rejected by employer' }
       ];
       rows = groups.map((g, i) => {
-        let groupJobs = filtered.filter(j => (j.response_status || 'none') === g.key);
+        const groupOf = (j) => (this.heldRow && this.heldRow.id === j.id) ? this.heldRow.group : (j.response_status || 'none');
+        let groupJobs = filtered.filter(j => groupOf(j) === g.key);
         if (g.key === 'interview') {
-          groupJobs = groupJobs.slice().sort((a, b) =>
-            (a.interview_date || '9999-99-99').localeCompare(b.interview_date || '9999-99-99'));
+          // Only rows actually in Interview use their interview date; a held
+          // row passing through keeps no date here (D-32 item 5).
+          const iv = (j) => ((j.response_status === 'interview' && j.interview_date) || '9999-99-99');
+          groupJobs = groupJobs.slice().sort((a, b) => iv(a).localeCompare(iv(b)));
         }
         const isEmpty = groupJobs.length === 0;
         const header = `
@@ -2677,6 +2731,8 @@ class App {
   }
 
   openJob(id) {
+    this.heldRow = null;
+    this.dateEditPending = false;
     this.setState({
       view: 'detail', selectedId: id, activeTab: 'analysis',
       flaggingOpen: false, rejectingOpen: false, applyingOpen: false,
