@@ -4,7 +4,7 @@
 This file says *what the app does*; `JA-LITE-DECISIONS.md` says why and `JA-LITE-STATE.md` what is left.
 When they disagree, **this one wins** — it is the only one read from the code.
 
-Source `index.html` · `APP_VERSION` **29** · 3,047 lines, 406,511 bytes · regenerate with
+Source `index.html` · `APP_VERSION` **30** · 3,073 lines, 408,404 bytes · regenerate with
 `node behaviour-map.js ~/Desktop/job-applyr-lite/index.html`
 
 ## Buckets
@@ -22,6 +22,13 @@ Choosing Interview or Rejected by employer when that date is empty does **not** 
 **An applied job never leaves Applied because of its outcome.** The `rejected` *bucket* means the user
 rejected the job; "Rejected by employer" inside Applied means the employer rejected the user. See D-21.
 
+## The Flagged tab has a Considering group
+
+Rows group by the record field `considering`, in this order: *no heading* (`considering` `false`), **Considering** (`considering` `true`).
+A group with no label gets no heading: **yes** · a labelled group shows its heading even when empty, as Applied does: **yes**. Within each group the list's normal sort applies.
+Each Flagged row starts with a checkbox and a 🤔 in its own first column: **yes** · hover text `Considering` · that column's header is blank, no select-all: **yes**. Clicking the box does not open the job.
+**Only the user clears it.** Moving a job between buckets leaves `considering` alone: **yes**. Outside Flagged nothing shows, but the value stays stored, so a job that returns to Flagged lands in Considering again. It is still a Flagged job and counts in the Flagged total. See D-33.
+
 ## A job detail view
 
 Tabs, in order: **Analysis** (`analysis`) · **Notes & Questions** (`notes`) · **Resume** (`resume`) · **Cover Letter** (`coverletter`) · **Portfolio Guidance** (`portfolio`).
@@ -38,7 +45,7 @@ Fit sections list `qualItems` / `envItems`; an item is `{tone, text}` or a plain
 - `flagReason` '' · `qualItems` [] · `envItems` [] · `fullPosting` '' · `resume` ''
 - `coverletter` '' · `openQuestions` '' · `portfolioGuidance` [] · `generating` false · `materialsError` ''
 - `sourceUrl` '' · `appliedDate` '' · `rejectedDate` '' · `response_status` 'none' · `interview_date` ''
-- `employer_rejected_date` ''
+- `employer_rejected_date` '' · `considering` false
 
 Filled in when a record is built, if absent: `addedDate`, `postedDateIso`, `postedDate`, `storageKey`.
 
@@ -70,7 +77,7 @@ Setup lives on Settings. Until every requirement is met, every other tab shows o
 - `backupOff` — turn on automatic backup on the *Settings tab* (a link)
 - `backupFailed` — fix automatic backup on the *Settings tab* (a link)
 
-**While any line shows, these refuse and their controls are greyed out:** `deleteJob()`, `generateMaterials()`, `handleSave()`, `moveJob()`, `openReasonPanel()`, `regenerateDoc()`, `runAnalysis()`, `saveDoc()`, `saveNotes()`, `setEmployerRejectedDate()`, `setInterviewDate()`, `setResponseDate()`, `setResponseStatus()`, `startEditing()`, `updateJobField()`.
+**While any line shows, these refuse and their controls are greyed out:** `deleteJob()`, `generateMaterials()`, `handleSave()`, `moveJob()`, `openReasonPanel()`, `regenerateDoc()`, `runAnalysis()`, `saveDoc()`, `saveNotes()`, `setConsidering()`, `setEmployerRejectedDate()`, `setInterviewDate()`, `setResponseDate()`, `setResponseStatus()`, `startEditing()`, `updateJobField()`.
 Viewing stays open — switching buckets, sorting, opening a job, switching its tabs, exporting.
 
 ## Everything the user can trigger
@@ -97,6 +104,7 @@ Every `app.*` handler reachable from the interface:
 - `saveDoc()` — writes the open document back to the record
 - `saveNotes()` — writes the notes field back to the record
 - `setBucket()` — switches the visible bucket tab
+- `setConsidering()` — writes `considering` from the 🤔 checkbox on a Flagged row — only the user sets or clears it (see the Flagged tab section)
 - `setEmployerRejectedDate()` — writes `employer_rejected_date` (the employer's rejection, not `rejectedDate`) from the inline date field on a Rejected by employer row
 - `setInterviewDate()` — writes `interview_date` from the inline picker
 - `setResponseStatus()` — writes `response_status`; the row regroups at once for No response, or for an outcome whose date is already there — otherwise it waits (see the Applied tab section)

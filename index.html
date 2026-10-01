@@ -704,7 +704,7 @@ const UI_STATE_KEY = 'ui:state';
 const MIGRATION_KEY = 'meta:migrations';
 // Build identifier. Logged on boot only — two builds are otherwise
 // indistinguishable once the file is open.
-const APP_VERSION = '29';
+const APP_VERSION = '30';
 
 // Duplicate-row marking. The red is the design system's existing
 // --color-rejected-700; the yellow is new, deliberately not --color-flagged-100,
@@ -1572,7 +1572,8 @@ function normalizeJob(raw, existingJobs) {
     notes: '', flagReason: '', qualItems: [], envItems: [], fullPosting: '',
     resume: '', coverletter: '', openQuestions: '', portfolioGuidance: [],
     generating: false, materialsError: '',
-    sourceUrl: '', appliedDate: '', rejectedDate: '', response_status: 'none', interview_date: '', employer_rejected_date: ''
+    sourceUrl: '', appliedDate: '', rejectedDate: '', response_status: 'none', interview_date: '', employer_rejected_date: '',
+    considering: false
   }, raw || {});
 
   job.addedDate = job.addedDate || today;
@@ -1878,6 +1879,14 @@ class App {
     const dateField = RESPONSE_DATE_FIELD[value];
     this.updateJobField(id, 'response_status', value);
     this.heldRow = (dateField && !job[dateField] && shownGroup !== value) ? { id, group: shownGroup } : null;
+    this.render();
+  }
+  // D-33. Only the user sets or clears it. Nothing else in the app touches
+  // this field, including moving the job between buckets, so a job that leaves
+  // Flagged and comes back lands in Considering again. Shown in Flagged only.
+  setConsidering(id, checked) {
+    if (this.refuseIfBlocked()) return;
+    this.updateJobField(id, 'considering', !!checked);
     this.render();
   }
   setInterviewDate(id, value) {
@@ -2366,6 +2375,7 @@ class App {
       const rs = j.response_status || 'none';
       return `
         <tr class="jd-row" style="cursor:pointer" onclick="app.openJob('${j.id}')">
+          ${showFlags ? `<td style="width:1%;white-space:nowrap" onclick="event.stopPropagation()"><label class="jd-tooltip" data-tooltip="Considering" style="font-size:14px;margin-right:var(--space-2);cursor:pointer;white-space:nowrap"><input type="checkbox" aria-label="Considering" style="vertical-align:middle;margin:0 3px 0 0;accent-color:color-mix(in srgb, var(--color-text) 60%, var(--color-bg))" ${j.considering ? 'checked' : ''} ${lock} onchange="app.setConsidering('${j.id}', this.checked)"><span style="font-size:21px;vertical-align:middle;line-height:1">🤔</span></label></td>` : ''}
           <td style="text-transform:uppercase;font-size:14px;letter-spacing:0.04em" class="text-muted">${(j.duplicateCheck && j.duplicateCheck.isReapply)
             ? `<span class="jd-tooltip" data-tooltip="Duplicate — already in your list" style="background:${DUPE_HIGHLIGHT};padding:2px 6px">${escapeHtml(j.company)} - <strong style="color:${DUPE_MARK};font-weight:700">D</strong></span>`
             : escapeHtml(j.company)}</td>
@@ -2419,6 +2429,21 @@ class App {
         const body = isEmpty ? '' : groupJobs.map(renderRow).join('');
         return header + body;
       }).join('');
+    } else if (showFlags) {
+      // D-33. Same pattern as Applied's groups: every heading shows, empty or not.
+      const groups = [
+        { key: false, label: '' },
+        { key: true, label: 'Considering' }
+      ];
+      const flaggedColspan = 8;
+      rows = groups.map((g, i) => {
+        const groupJobs = filtered.filter(j => !!j.considering === g.key);
+        const header = g.label ? `
+          <tr style="background:transparent"><td colspan="${flaggedColspan}" style="padding-top:var(--space-2);padding-bottom:var(--space-2);border:none${i > 0 ? ';border-top:1px solid var(--color-divider)' : ''}">
+            <span class="card-kicker" style="font-size:15px;font-weight:600">${g.label}</span>
+          </td></tr>` : '';
+        return header + groupJobs.map(renderRow).join('');
+      }).join('');
     } else {
       rows = filtered.map(renderRow).join('');
     }
@@ -2430,6 +2455,7 @@ class App {
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px;margin-bottom:var(--space-8)">${bucketCards}</div>
         <table class="table">
           <thead><tr>
+            ${showFlags ? '<th aria-label="Considering"></th>' : ''}
             <th style="cursor:pointer;white-space:nowrap" onclick="app.sortBy('company')">Company<span style="color:var(--color-accent);font-weight:600;font-size:11px;margin-left:4px">${arrow('company')}</span></th>
             <th style="cursor:pointer;white-space:nowrap;min-width:200px" onclick="app.sortBy('title')">Title<span style="color:var(--color-accent);font-weight:600;font-size:11px;margin-left:4px">${arrow('title')}</span></th>
             <th style="white-space:nowrap">Location</th>
